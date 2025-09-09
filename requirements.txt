@@ -1,0 +1,18 @@
+# Core Dependencies
+alpaca-py
+pandas
+numpy
+scikit-learn
+lightgbm
+matplotlib
+python-dotenv
+torch
+
+# Live Trading Dependencies  
+aiohttp       # Async HTTP client
+asyncio       # Built-in async support
+
+# Development & Testing Dependencies
+pytest
+black
+ruff

@@ -1,0 +1,15 @@
+# env
+.env
+
+# coding agents
+.cline
+.claude
+CLAUDE.md
+
+# pytest
+.pytest_cache
+__pycache__/
+
+# reproducible
+data/
+logs/
