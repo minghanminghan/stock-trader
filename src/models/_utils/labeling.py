@@ -2,6 +2,9 @@ import pandas as pd
 import numpy as np
 from src.utils.logging_config import logger
 
+# TODO: change this to new model
+# maybe even remove
+
 def create_labels(df, horizon=5, threshold=0.0002):
     """
     Creates regression and classification labels for the given stock data.

@@ -5,14 +5,18 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # --- Alpaca API Configuration ---
-ALPACA_API_KEY = os.getenv("ALPACA_API_KEY")
-ALPACA_SECRET_KEY = os.getenv("ALPACA_SECRET_KEY")
+ALPACA_API_KEY = os.getenv("ALPACA_API_KEY") or ''
+ALPACA_SECRET_KEY = os.getenv("ALPACA_SECRET_KEY") or ''
 
-if not ALPACA_API_KEY or not ALPACA_SECRET_KEY:
+if ALPACA_API_KEY == '' or ALPACA_SECRET_KEY == '':
     raise ValueError("Alpaca API keys must be set in the .env file.")
 
 # --- Data Configuration ---
 TICKERS = ["SPY", "AAPL", "MSFT", "NVDA", "TSLA"]
+TRAINING_START_DATE = "2022-01-01"
+TRAINING_END_DATE = "2023-01-01"
+TEST_START_DATE = "2023-01-01"
+TEST_END_DATE = "2023-06-01"
 START_DATE = "2022-01-01"
 END_DATE = "2024-01-01"
 

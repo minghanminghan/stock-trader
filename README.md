@@ -20,7 +20,8 @@ system workload:
   - [0, #_SYMBOLS] POST requests/min
 
 # TODO
-- train RNN model on S&P 100 across 3-4 years
+- train LSTM model on S&P 100 across 3-4 years
+  - update tickers in src/config.py
   - new output:
     - period, value, confidence
     - model takes a forecasting role
@@ -30,6 +31,9 @@ system workload:
     - Maximum Drawdown (downside protection)
     - Win Rate (consistency)
     - Profit Factor (wins vs losses ratio)
-- refactor codebase to reflect rest of the code 
-- include multiple prediction models (XGBoost, NN)
+- look at uuid, seeding random stuff
+- create benchmarking tools
+- create unit tests for alpaca/, models/, trading/
+- redo LGBM
+- add prediction models (XGBoost, NN)
 - implement periodic retraining + deployment
