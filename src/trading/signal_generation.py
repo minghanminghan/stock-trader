@@ -1,79 +1,180 @@
 #!/usr/bin/env python3
 """
-Signal Generation Module
+Integrated Signal Generation Module
 
-Connects ML model predictions to trading execution via broker integration.
-Handles signal filtering and order management with extensible model interface.
+Orchestrates the complete trading pipeline from market data to executed orders.
+Properly integrates LSTM predictor with trading strategy framework.
+
+Architecture:
+Market Data → LSTM Predictor → Prediction Adapter → Trading Strategy → Signal Generator → Broker
+
+This fixes the previous architectural issue where strategy was bypassed.
 """
 
 from typing import Dict, List, Optional, Tuple, Any
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 import pandas as pd
+import numpy as np
 
 from src.models.lstm.predictor import LSTMPredictor
+from src.trading.strategy import StrategyConfig, create_strategy, BaseStrategy
 from src.alpaca.broker import AlpacaBroker, OrderRequest, create_buy_order, create_sell_order
 from src.alpaca.data_stream import LiveDataStream
-from src.config import TICKERS
+from src.config import TICKERS, LSTM_CONFIG
 from src.utils.logging_config import logger
 
 
-@dataclass
-class SignalConfig:
-    """Configuration for signal generation."""
+class PredictionAdapter:
+    """
+    Converts multi-horizon LSTM predictions to strategy-compatible format.
     
-    # Model thresholds
-    min_confidence: float = 0.6       # Minimum confidence to trade
-    min_price_change: float = 0.005   # Minimum expected price change (0.5%)
+    Handles aggregation across time horizons and converts price predictions
+    to directional signals with confidence scores.
+    """
     
-    # Signal filtering
-    max_signals_per_minute: int = 10  # Rate limiting
+    def __init__(self, 
+                 horizon_weights: Dict[str, float],
+                 min_return_threshold: float):
+        """
+        Initialize prediction adapter.
+        
+        Args:
+            horizon_weights: Weights for different prediction horizons
+            min_return_threshold: Minimum return threshold for signal generation
+        """
+        self.horizon_weights = horizon_weights
+        self.min_return_threshold = min_return_threshold
     
-    # Position management
-    max_position_value: float = 1000.0  # Max position size in dollars
-    default_shares: int = 1            # Default number of shares to trade
+    def convert_predictions(self, 
+                          lstm_predictions: Dict[str, Dict[str, Dict[str, float]]],
+                          current_prices: Dict[str, float]) -> Dict[str, Dict[str, Any]]:
+        """
+        Convert LSTM multi-horizon predictions to strategy format.
+        
+        Args:
+            lstm_predictions: LSTM output {symbol -> horizon -> prediction_data}
+            current_prices: Current prices {symbol -> price}
+            
+        Returns:
+            Strategy format {symbol -> {direction, confidence, expected_return}}
+        """
+        adapted_predictions = {}
+        
+        for symbol, horizon_predictions in lstm_predictions.items():
+            if not horizon_predictions:
+                continue
+                
+            current_price = current_prices.get(symbol, 0.0)
+            if current_price <= 0:
+                continue
+            
+            # Calculate weighted predictions across horizons
+            weighted_return = 0.0
+            weighted_confidence = 0.0
+            total_weight = 0.0
+            
+            for horizon_key, pred_data in horizon_predictions.items():
+                if horizon_key not in self.horizon_weights:
+                    continue
+                    
+                predicted_price = pred_data.get('price', current_price)
+                confidence = pred_data.get('confidence', 0.0)
+                weight = self.horizon_weights[horizon_key]
+                
+                # Calculate expected return
+                expected_return = (predicted_price - current_price) / current_price
+                
+                weighted_return += weight * expected_return
+                weighted_confidence += weight * confidence
+                total_weight += weight
+            
+            if total_weight == 0:
+                continue
+            
+            # Normalize by total weight
+            avg_return = weighted_return / total_weight
+            avg_confidence = weighted_confidence / total_weight
+            
+            # Determine direction based on expected return
+            if abs(avg_return) < self.min_return_threshold:
+                direction = 'hold'
+            elif avg_return > 0:
+                direction = 'up'
+            else:
+                direction = 'down'
+            
+            adapted_predictions[symbol] = {
+                'direction': direction,
+                'confidence': avg_confidence,
+                'expected_return': avg_return,
+                'current_price': current_price
+            }
+        
+        return adapted_predictions
 
 
 class SignalGenerator:
     """
-    Generates trading signals from ML model predictions and executes via broker.
+    Integrated signal generation system that combines LSTM predictions with trading strategy.
     
-    Integrates model predictions, applies filters, and manages
-    order execution through AlpacaBroker.
+    Proper architecture:
+    Market Data → LSTM Predictor → Prediction Adapter → Trading Strategy → Signal Generator → Broker
+    
+    This component orchestrates the entire pipeline from raw market data to executed orders.
     """
     
     def __init__(self, 
                  broker: AlpacaBroker,
-                 config: Optional[SignalConfig] = None,
-                 model_path: Optional[str] = None):
+                 strategy_config: StrategyConfig,
+                 strategy_type: str,
+                 model_path: str):
         """
-        Initialize signal generator.
+        Initialize integrated signal generator.
         
         Args:
             broker: AlpacaBroker instance for order execution
-            config: SignalConfig with parameters
-            model_path: Path to model (optional, defaults to LSTM)
+            strategy_config: StrategyConfig with trading parameters
+            strategy_type: Type of strategy to use (e.g. "momentum")
+            model_path: Path to LSTM model
         """
         self.broker = broker
-        self.config = config or SignalConfig()
+        self.strategy_config = strategy_config or StrategyConfig()
         
-        # Initialize model predictor
+        # Initialize strategy
+        self.strategy = create_strategy(strategy_type, self.strategy_config)
+        
+        # Initialize LSTM predictor
         try:
             self.predictor = LSTMPredictor(model_path=model_path)
-            logger.info("Model predictor initialized successfully")
+            logger.info("LSTM predictor initialized successfully")
         except Exception as e:
-            logger.error(f"Failed to initialize model predictor: {e}")
+            logger.error(f"Failed to initialize LSTM predictor: {e}")
             self.predictor = None
         
-        # Signal tracking
+        # Initialize prediction adapter with lower threshold for more signals
+        self.adapter = PredictionAdapter(
+            horizon_weights=LSTM_CONFIG['loss']['horizon_weights'],
+            min_return_threshold=0.001  # strategy_config.take_profit_pct
+        )
+        
+        # Execution tracking
         self.recent_signals = {}  # Track recent signals for rate limiting
         self.signal_history = []  # Keep history for analysis
+        self.execution_stats = {
+            'total_signals': 0,
+            'total_orders': 0,
+            'successful_orders': 0,
+            'failed_orders': 0
+        }
         
-        logger.info("SignalGenerator initialized")
+        logger.info(f"Integrated SignalGenerator initialized with {strategy_type} strategy")
     
     def generate_and_execute_signals(self, market_data: pd.DataFrame) -> Dict[str, Any]:
         """
-        Generate signals from market data and execute orders.
+        Complete signal generation and execution pipeline.
+        
+        Pipeline: Market Data → LSTM → Adapter → Strategy → Orders → Broker
         
         Args:
             market_data: DataFrame with OHLCV data and MultiIndex (symbol, timestamp)
@@ -83,434 +184,411 @@ class SignalGenerator:
         """
         execution_results = {
             'timestamp': datetime.now(),
+            'symbols_processed': 0,
             'signals_generated': 0,
             'orders_placed': 0,
             'orders_successful': 0,
             'errors': [],
-            'signals': {},
+            'raw_predictions': {},
+            'adapted_predictions': {},
+            'strategy_signals': {},
             'orders': []
         }
         
         try:
-            # Generate signals from models
-            signals = self._generate_signals(market_data)
-            execution_results['signals'] = signals
-            execution_results['signals_generated'] = len([s for s in signals.values() if s['action'] != 'HOLD'])
+            # Step 1: Get current prices from market data
+            current_prices = self._extract_current_prices(market_data)
+            execution_results['symbols_processed'] = len(current_prices)
             
-            # Filter and rate limit signals
-            filtered_signals = self._filter_signals(signals)
+            # Step 2: Generate LSTM predictions
+            if self.predictor is None:
+                execution_results['errors'].append("LSTM predictor not available")
+                return execution_results
+                
+            logger.info(f"Generating LSTM predictions for {len(current_prices)} symbols")
+            lstm_predictions = self.predictor.predict_prices(market_data=market_data)
+            logger.info(f"LSTM predictions generated: {len(lstm_predictions)} symbols")
             
-            # Execute orders
-            orders = self._execute_signals(filtered_signals)
-            execution_results['orders'] = orders
-            execution_results['orders_placed'] = len(orders)
-            execution_results['orders_successful'] = sum(1 for o in orders if o.get('success', False))
+            execution_results['raw_predictions'] = lstm_predictions
+            
+            # Step 3: Adapt predictions to strategy format
+            adapted_predictions = self.adapter.convert_predictions(
+                lstm_predictions, current_prices
+            )
+            execution_results['adapted_predictions'] = adapted_predictions
+            
+            # Step 4: Generate signals using strategy
+            signals = self.strategy.generate_signals(
+                model_predictions=adapted_predictions,
+                current_prices=current_prices
+            )
+            execution_results['strategy_signals'] = signals
+            execution_results['signals_generated'] = len([s for s in signals.values() if s.get('action') != 'hold'])
+            
+            # Step 5: Process signals into orders
+            orders = self.strategy.process_signals(signals)
+            
+            # Step 6: Execute orders through broker
+            for order in orders:
+                try:
+                    # Execute order through broker
+                    order_result = self._execute_order(order)
+                    execution_results['orders'].append(order_result)
+                    execution_results['orders_placed'] += 1
+                    
+                    if order_result.get('success', False):
+                        execution_results['orders_successful'] += 1
+                        self.execution_stats['successful_orders'] += 1
+                    else:
+                        self.execution_stats['failed_orders'] += 1
+                    
+                except Exception as e:
+                    error_msg = f"Error executing order: {e}"
+                    logger.error(error_msg)
+                    execution_results['errors'].append(error_msg)
+                    self.execution_stats['failed_orders'] += 1
+            
+            # Update statistics
+            self.execution_stats['total_signals'] += execution_results['signals_generated']
+            self.execution_stats['total_orders'] += execution_results['orders_placed']
             
             # Log summary
             logger.info(f"Signal generation complete: {execution_results['signals_generated']} signals, "
                        f"{execution_results['orders_placed']} orders placed")
             
         except Exception as e:
-            error_msg = f"Error in signal generation: {e}"
+            error_msg = f"Error in signal generation pipeline: {e}"
             logger.error(error_msg)
             execution_results['errors'].append(error_msg)
         
         return execution_results
     
-    def _generate_signals(self, market_data: pd.DataFrame) -> Dict[str, Dict]:
+    def _extract_current_prices(self, market_data: pd.DataFrame) -> Dict[str, float]:
         """
-        Generate trading signals from ML models.
+        Extract current prices from market data.
         
         Args:
-            market_data: Market data with features
+            market_data: DataFrame with MultiIndex (symbol, timestamp)
             
         Returns:
-            Dict mapping symbol -> signal information
+            Dict mapping symbol -> current price
         """
-        signals = {}
-        
-        # Get current prices for signal generation
-        current_prices = self._extract_current_prices(market_data)
-        
-        # Generate model signals
-        if self.predictor:
-            try:
-                predictions = self.predictor.predict_prices(market_data)
-                model_signals = self.predictor.get_trading_signals(
-                    {symbol: predictions for symbol, predictions in predictions.items()},
-                    current_prices,
-                    min_confidence=self.config.min_confidence,
-                    min_price_change=self.config.min_price_change
-                )
-                logger.debug(f"Generated model signals for {len(model_signals)} symbols")
-                
-                # Convert model signals to standard format
-                for symbol in current_prices.keys():
-                    if symbol in model_signals:
-                        signal = model_signals[symbol]
-                        signals[symbol] = {
-                            'symbol': symbol,
-                            'action': signal.get('signal', 'HOLD'),
-                            'confidence': signal.get('confidence', 0.0),
-                            'expected_return': signal.get('expected_return', 0.0),
-                            'current_price': current_prices.get(symbol, 0.0),
-                            'horizon': signal.get('horizon', '5min'),
-                            'predicted_price': signal.get('predicted_price', current_prices.get(symbol, 0.0))
-                        }
-                    else:
-                        signals[symbol] = self._get_hold_signal(symbol, current_prices.get(symbol, 0.0))
-                        
-            except Exception as e:
-                logger.error(f"Error generating model signals: {e}")
-                # Create hold signals for all symbols
-                for symbol in current_prices.keys():
-                    signals[symbol] = self._get_hold_signal(symbol, current_prices.get(symbol, 0.0))
-        else:
-            # No model available - generate hold signals
-            for symbol in current_prices.keys():
-                signals[symbol] = self._get_hold_signal(symbol, current_prices.get(symbol, 0.0))
-        
-        return signals
-    
-    def _extract_current_prices(self, market_data: pd.DataFrame) -> Dict[str, float]:
-        """Extract current prices from market data."""
         current_prices = {}
         
         try:
             for symbol in market_data.index.get_level_values(0).unique():
-                symbol_data = market_data.loc[symbol]
+                symbol_data = market_data.loc[symbol].sort_index()
                 if not symbol_data.empty:
-                    # Get latest close price
-                    latest_price = symbol_data.iloc[-1]['close']
-                    current_prices[symbol] = float(latest_price)
+                    current_prices[symbol] = float(symbol_data.iloc[-1]['close'])
+                    
         except Exception as e:
             logger.error(f"Error extracting current prices: {e}")
-        
+            
         return current_prices
     
-    def _get_hold_signal(self, symbol: str, current_price: float) -> Dict:
+    def _execute_order(self, order: Dict[str, Any]) -> Dict[str, Any]:
         """
-        Generate a default hold signal.
+        Execute single order through broker.
         
         Args:
-            symbol: Stock symbol
-            current_price: Current market price
+            order: Order dictionary from strategy
             
         Returns:
-            Hold signal dictionary
+            Execution result dictionary
         """
-        return {
-            'symbol': symbol,
-            'action': 'HOLD',
-            'confidence': 0.0,
-            'expected_return': 0.0,
-            'current_price': current_price,
-            'horizon': '5min',
-            'predicted_price': current_price
-        }
-    
-    def _filter_signals(self, signals: Dict[str, Dict]) -> Dict[str, Dict]:
-        """
-        Filter signals based on rate limits and other criteria.
-        
-        Args:
-            signals: Raw signals from models
-            
-        Returns:
-            Filtered signals ready for execution
-        """
-        filtered = {}
-        current_time = datetime.now()
-        
-        # Clean old signals from recent tracking
-        cutoff_time = current_time - timedelta(minutes=1)
-        self.recent_signals = {
-            symbol: timestamps for symbol, timestamps in self.recent_signals.items()
-            if any(t > cutoff_time for t in timestamps)
-        }
-        
-        signal_count = 0
-        for symbol, signal in signals.items():
-            if signal['action'] == 'HOLD':
-                continue
-            
-            # Check rate limiting
-            if signal_count >= self.config.max_signals_per_minute:
-                logger.warning("Rate limit reached, skipping remaining signals")
-                break
-            
-            # Check symbol-specific rate limiting
-            recent_for_symbol = self.recent_signals.get(symbol, [])
-            recent_count = len([t for t in recent_for_symbol if t > cutoff_time])
-            
-            if recent_count >= 3:  # Max 3 signals per symbol per minute
-                logger.debug(f"Rate limit for {symbol}, skipping signal")
-                continue
-            
-            # Check minimum confidence
-            if signal['confidence'] < self.config.min_confidence:
-                continue
-            
-            # Add to filtered signals
-            filtered[symbol] = signal
-            signal_count += 1
-            
-            # Track this signal
-            if symbol not in self.recent_signals:
-                self.recent_signals[symbol] = []
-            self.recent_signals[symbol].append(current_time)
-        
-        logger.info(f"Filtered {len(filtered)} signals from {len(signals)} total")
-        return filtered
-    
-    def _execute_signals(self, signals: Dict[str, Dict]) -> List[Dict]:
-        """
-        Execute trading orders based on signals.
-        
-        Args:
-            signals: Filtered signals ready for execution
-            
-        Returns:
-            List of order execution results
-        """
-        order_results = []
-        
-        for symbol, signal in signals.items():
-            try:
-                # Calculate position size
-                position_size = self._calculate_position_size(signal)
-                
-                # Create order
-                if signal['action'] == 'BUY':
-                    order = create_buy_order(symbol, position_size)
-                elif signal['action'] == 'SELL':
-                    # Check if we have position to sell
-                    position = self.broker.get_position(symbol)
-                    if position and position['qty'] > 0:
-                        order = create_sell_order(symbol, min(position_size, position['qty']))
-                    else:
-                        logger.warning(f"No position to sell for {symbol}")
-                        continue
-                else:
-                    continue
-                
-                # Execute order
-                result = self.broker.place_order(order)
-                
-                # Add signal metadata to result
-                result_dict = {
-                    'symbol': symbol,
-                    'action': signal['action'],
-                    'confidence': signal['confidence'],
-                    'expected_return': signal['expected_return'],
-                    'success': result.success,
-                    'order_id': result.order_id,
-                    'error': result.error,
-                    'timestamp': datetime.now()
-                }
-                
-                order_results.append(result_dict)
-                
-                # Store in signal history
-                self.signal_history.append({
-                    'timestamp': datetime.now(),
-                    'signal': signal,
-                    'order_result': result_dict
-                })
-                
-                logger.info(f"Executed {signal['action']} for {symbol}: "
-                           f"confidence={signal['confidence']:.3f}, success={result.success}")
-                
-            except Exception as e:
-                error_msg = f"Error executing signal for {symbol}: {e}"
-                logger.error(error_msg)
-                order_results.append({
-                    'symbol': symbol,
-                    'action': signal['action'],
+        try:
+            symbol: str = order.get('symbol')
+            side: str = order.get('side')  # 'buy' or 'sell'
+            quantity: float = order.get('quantity', 1)
+
+            # Create order request
+            if side == 'buy':
+                order_request = create_buy_order(
+                    symbol=symbol,
+                    qty=quantity,
+                )
+            elif side == 'sell':
+                order_request = create_sell_order(
+                    symbol=symbol,
+                    qty=quantity,
+                )
+            else:
+                return {
                     'success': False,
-                    'error': error_msg,
-                    'timestamp': datetime.now()
-                })
-        
-        return order_results
-    
-    def _calculate_position_size(self, signal: Dict) -> float:
-        """
-        Calculate position size based on signal and risk management.
-        
-        Args:
-            signal: Trading signal
+                    'error': f"Unknown side: {side}",
+                    'order': order
+                }
             
-        Returns:
-            Position size (number of shares)
-        """
-        # Simple fixed size for now
-        # Could be enhanced with:
-        # - Risk-based sizing
-        # - Confidence-based sizing
-        # - Available buying power consideration
-        
-        return float(self.config.default_shares)
+            # Submit order to broker
+            result = self.broker.place_order(order_request)
+            
+            # Record signal history
+            self.signal_history.append({
+                'timestamp': datetime.now(),
+                'symbol': symbol,
+                'side': side,
+                'quantity': quantity,
+                'order_result': result
+            })
+            
+            return {
+                'success': result.get('success', False),
+                'order_id': result.get('order_id'),
+                'symbol': symbol,
+                'side': side,
+                'quantity': quantity,
+                'broker_result': result,
+                'original_order': order
+            }
+            
+        except Exception as e:
+            logger.error(f"Error executing order: {e}")
+            return {
+                'success': False,
+                'error': str(e),
+                'order': order
+            }
     
     def get_signal_statistics(self) -> Dict[str, Any]:
-        """Get statistics about recent signal generation."""
-        if not self.signal_history:
-            return {
-                'total_signals': 0,
-                'successful_orders': 0,
-                'success_rate': 0.0,
-                'recent_symbols': []
-            }
-        
-        recent_history = [
-            h for h in self.signal_history 
-            if h['timestamp'] > datetime.now() - timedelta(hours=24)
-        ]
-        
-        successful_orders = sum(1 for h in recent_history if h['order_result']['success'])
-        total_signals = len(recent_history)
-        
+        """Get signal generation and execution statistics."""
         return {
-            'total_signals': total_signals,
-            'successful_orders': successful_orders,
-            'success_rate': successful_orders / max(total_signals, 1),
-            'recent_symbols': list(set(h['signal']['symbol'] for h in recent_history[-10:])),
-            'avg_confidence': sum(h['signal']['confidence'] for h in recent_history) / max(total_signals, 1),
-            'horizons_used': list(set(h['signal'].get('horizon', '5min') for h in recent_history))
+            'execution_stats': self.execution_stats.copy(),
+            'recent_signals_count': len(self.recent_signals),
+            'signal_history_count': len(self.signal_history),
+            'strategy_status': self.strategy.get_status() if hasattr(self.strategy, 'get_status') else {},
+            'model_info': self.predictor.get_model_info() if self.predictor else {}
         }
+    
+    def reset_statistics(self):
+        """Reset signal and execution statistics."""
+        self.execution_stats = {
+            'total_signals': 0,
+            'total_orders': 0,
+            'successful_orders': 0,
+            'failed_orders': 0
+        }
+        self.signal_history.clear()
+        self.recent_signals.clear()
 
 
-class LiveSignalGenerator(SignalGenerator):
-    """
-    Live signal generator that integrates with data streaming.
-    
-    Connects to LiveDataStream for real-time market data and generates
-    signals automatically.
-    """
-    
-    def __init__(self,
-                 broker: AlpacaBroker,
-                 data_stream: LiveDataStream,
-                 config: Optional[SignalConfig] = None,
-                 model_path: Optional[str] = None,
-                 update_interval_seconds: int = 60):
-        """
-        Initialize live signal generator.
-        
-        Args:
-            broker: AlpacaBroker for order execution
-            data_stream: LiveDataStream for market data
-            config: SignalConfig parameters
-            model_path: Path to model
-            update_interval_seconds: How often to generate signals
-        """
-        super().__init__(broker, config, model_path)
-        
-        self.data_stream = data_stream
-        self.update_interval = update_interval_seconds
-        self.is_running = False
-        
-        # Subscribe to data updates
-        self.data_stream.add_subscriber(self._on_new_data)
-        
-        logger.info(f"LiveSignalGenerator initialized with {update_interval}s update interval")
-    
-    def start(self, symbols: Optional[List[str]] = None):
-        """
-        Start live signal generation.
-        
-        Args:
-            symbols: List of symbols to track (default: from config)
-        """
-        if symbols is None:
-            symbols = TICKERS
-        
-        self.is_running = True
-        self.data_stream.start_stream(symbols)
-        
-        logger.info(f"Live signal generation started for {symbols}")
-    
-    def stop(self):
-        """Stop live signal generation."""
-        self.is_running = False
-        self.data_stream.stop_stream()
-        logger.info("Live signal generation stopped")
-    
-    def _on_new_data(self, symbol: str, bar_data: Dict):
-        """
-        Callback for new market data.
-        
-        Args:
-            symbol: Symbol that was updated
-            bar_data: New bar data
-        """
-        # This could trigger signal generation, but for now we'll use 
-        # scheduled updates to avoid too frequent trading
-        pass
-
-
-# Convenience function for easy setup
 def create_signal_generator(broker: AlpacaBroker, 
-                          config: Optional[SignalConfig] = None,
-                          live_stream: Optional[LiveDataStream] = None) -> SignalGenerator:
+                           strategy_config: StrategyConfig,
+                           strategy_type: str,
+                           model_path: str) -> SignalGenerator:
     """
-    Create a signal generator instance.
+    Factory function to create configured signal generator.
     
     Args:
         broker: AlpacaBroker instance
-        config: SignalConfig (optional)
-        live_stream: LiveDataStream for real-time signals (optional)
+        strategy_config: Trading strategy configuration
+        strategy_type: Type of strategy ("momentum")
+        model_path: Path to LSTM model
         
     Returns:
-        SignalGenerator instance
+        Configured SignalGenerator instance
     """
-    if live_stream:
-        return LiveSignalGenerator(broker, live_stream, config)
-    else:
-        return SignalGenerator(broker, config)
+    return SignalGenerator(
+        broker=broker,
+        strategy_config=strategy_config,
+        strategy_type=strategy_type,
+        model_path=model_path
+    )
 
 
 if __name__ == "__main__":
-    # Example usage
+    """
+    Test the integrated signal generation system.
+    
+    This demonstrates the complete pipeline:
+    1. Create synthetic market data
+    2. Initialize LSTM predictor and strategy
+    3. Generate signals using proper integration
+    4. Execute orders through broker
+    """
+    import pandas as pd
+    import numpy as np
+    from pprint import pprint
+    from src.config import RANDOM_SEED
     from src.alpaca.broker import AlpacaBroker
     
-    # Create broker and signal generator
+    print("=== Testing Integrated Signal Generation System ===")
+    
+    # Create broker and strategy configuration
     broker = AlpacaBroker(paper=True)
-    signal_gen = create_signal_generator(broker)
     
-    # Example market data (in practice, this would come from data stream)
-    import pandas as pd
+    strategy_config = StrategyConfig(
+        symbols=['SPY', 'AAPL', 'NVDA'],
+        max_position_size=1000.0,
+        buy_threshold=0.6,
+        sell_threshold=0.6,
+        max_open_positions=3
+    )
     
-    # Create sample data
+    # Create integrated signal generator
+    signal_gen = create_signal_generator(
+        broker=broker,
+        strategy_config=strategy_config,
+        strategy_type="momentum",
+        model_path="src/models/lstm/weights/best_lstm_model.pth"
+    )
+    
+    # Create realistic market data for testing
     timestamps = pd.date_range('2024-01-01 09:30', periods=100, freq='1min')
-    symbols = ['SPY', 'AAPL']
+    symbols = ['SPY', 'AAPL', 'NVDA']
+    n_steps = len(timestamps)
+    n_symbols = len(symbols)
     
-    data_list = []
-    for symbol in symbols:
-        for timestamp in timestamps:
-            data_list.append({
-                'symbol': symbol,
-                'timestamp': timestamp,
-                'open': 100.0,
-                'high': 101.0,
-                'low': 99.0,
-                'close': 100.5,
-                'volume': 1000,
-                'return_1m': 0.001,
-                'mom_5m': 0.005,
-                'mom_15m': 0.002,
-                'mom_60m': 0.01,
-                'vol_15m': 0.02,
-                'vol_60m': 0.015,
-                'vol_zscore': 0.5,
-                'time_sin': 0.0,
-                'time_cos': 1.0
-            })
+    np.random.seed(RANDOM_SEED)
     
-    market_data = pd.DataFrame(data_list)
+    # Generate vectorized random walk data with higher volatility
+    price_changes = np.random.normal(0, 2.5, (n_symbols, n_steps))  # Increased from 0.5 to 2.5
+    spreads = np.random.uniform(0.5, 3.0, (n_symbols, n_steps))     # Increased spread
+    volumes = np.random.randint(800, 2001, (n_symbols, n_steps))
+    
+    # Technical indicators with higher volatility
+    mom_5m = np.random.uniform(-0.05, 0.05, (n_symbols, n_steps))     # Increased from ±0.01 to ±0.05
+    mom_15m = np.random.uniform(-0.03, 0.03, (n_symbols, n_steps))    # Increased from ±0.005 to ±0.03
+    mom_60m = np.random.uniform(-0.08, 0.08, (n_symbols, n_steps))    # Increased from ±0.02 to ±0.08
+    vol_15m = np.random.uniform(0.02, 0.08, (n_symbols, n_steps))     # Increased volatility measures
+    vol_60m = np.random.uniform(0.015, 0.06, (n_symbols, n_steps))    # Increased volatility measures
+    vol_zscore = np.random.uniform(-3.0, 3.0, (n_symbols, n_steps))   # Wider Z-score range
+    
+    # Time features
+    minutes_from_start = np.arange(n_steps)
+    time_sin = np.sin(2 * np.pi * minutes_from_start / (24 * 60))
+    time_cos = np.cos(2 * np.pi * minutes_from_start / (24 * 60))
+    
+    # Build DataFrame efficiently
+    data_arrays = []
+    
+    for i, symbol in enumerate(symbols):
+        # Random walk prices with trend bias to generate more signals
+        start_price = 100.0
+        # Add trend bias: SPY up, AAPL down, NVDA volatile
+        if symbol == 'SPY':
+            trend_bias = np.linspace(0, 5, n_steps)  # Upward trend
+        elif symbol == 'AAPL':  
+            trend_bias = np.linspace(0, -3, n_steps)  # Downward trend
+        else:  # NVDA
+            trend_bias = np.sin(np.linspace(0, 4*np.pi, n_steps)) * 3  # Oscillating
+            
+        prices = start_price + np.cumsum(price_changes[i]) + trend_bias
+        
+        # OHLC data
+        high_noise = np.random.uniform(0, spreads[i])
+        low_noise = np.random.uniform(0, spreads[i])
+        open_noise = np.random.uniform(-spreads[i]/2, spreads[i]/2)
+        
+        opens = prices + open_noise
+        highs = prices + high_noise
+        lows = prices - low_noise
+        closes = prices
+        
+        returns_1m = np.divide(price_changes[i], np.maximum(prices - price_changes[i], 0.01))
+        
+        symbol_df = pd.DataFrame({
+            'symbol': symbol,
+            'timestamp': timestamps,
+            'open': np.round(opens, 2),
+            'high': np.round(highs, 2),
+            'low': np.round(lows, 2),
+            'close': np.round(closes, 2),
+            'volume': volumes[i],
+            'return_1m': np.round(returns_1m, 6),
+            'mom_5m': np.round(mom_5m[i], 6),
+            'mom_15m': np.round(mom_15m[i], 6),
+            'mom_60m': np.round(mom_60m[i], 6),
+            'vol_15m': np.round(vol_15m[i], 6),
+            'vol_60m': np.round(vol_60m[i], 6),
+            'vol_zscore': np.round(vol_zscore[i], 3),
+            'time_sin': np.round(time_sin, 6),
+            'time_cos': np.round(time_cos, 6)
+        })
+        data_arrays.append(symbol_df)
+    
+    # Create final DataFrame with MultiIndex
+    market_data = pd.concat(data_arrays, ignore_index=True)
     market_data.set_index(['symbol', 'timestamp'], inplace=True)
     
-    # Generate and execute signals
-    results = signal_gen.generate_and_execute_signals(market_data)
-    print("Signal generation results:", results)
-    print("Signal statistics:", signal_gen.get_signal_statistics())
+    print(f"\nGenerated market data: {len(market_data)} rows, {len(symbols)} symbols")
+    
+    # Show price movements and volatility
+    for symbol in symbols:
+        symbol_data = market_data.loc[symbol]
+        start_price = symbol_data.iloc[0]['close']
+        end_price = symbol_data.iloc[-1]['close']
+        price_change = ((end_price - start_price) / start_price) * 100
+        volatility = symbol_data['return_1m'].std() * 100
+        
+        print(f"{symbol}: ${start_price:.2f} → ${end_price:.2f} ({price_change:+.1f}%, σ={volatility:.2f}%)")
+    
+    print(f"\nSample data for {symbols[0]}:")
+    print(market_data.loc[symbols[0]].tail(3))
+    
+    # Test the integrated pipeline
+    print("\n=== Running Integrated Signal Generation Pipeline ===")
+    
+    try:
+        # Generate and execute signals
+        results = signal_gen.generate_and_execute_signals(market_data)
+        
+        print("\n--- Execution Results ---")
+        print(f"Timestamp: {results['timestamp']}")
+        print(f"Symbols processed: {results['symbols_processed']}")
+        print(f"Signals generated: {results['signals_generated']}")
+        print(f"Orders placed: {results['orders_placed']}")
+        print(f"Orders successful: {results['orders_successful']}")
+        print(f"Errors: {len(results['errors'])}")
+        
+        if results['errors']:
+            print("\nErrors:")
+            for error in results['errors']:
+                print(f"  - {error}")
+        
+        # Show raw predictions
+        print("\n--- Raw LSTM Predictions ---")
+        for symbol, predictions in results['raw_predictions'].items():
+            print(f"{symbol}:")
+            for horizon, pred in predictions.items():
+                if isinstance(pred, dict) and 'price' in pred:
+                    print(f"  {horizon}: ${pred['price']:.2f} (conf: {pred.get('confidence', 0):.3f})")
+        
+        # Show adapted predictions
+        print("\n--- Adapted Predictions ---")
+        for symbol, pred in results['adapted_predictions'].items():
+            print(f"{symbol}: {pred['direction']} (conf: {pred['confidence']:.3f}, "
+                  f"return: {pred['expected_return']:.4f})")
+        
+        # Show strategy signals
+        print("\n--- Strategy Signals ---")
+        if results['strategy_signals']:
+            if isinstance(results['strategy_signals'], dict):
+                # Show first 3 signals if it's a dictionary
+                signal_items = list(results['strategy_signals'].items())[:3]
+                pprint(dict(signal_items))
+            else:
+                # Show first 3 signals if it's a list
+                pprint(results['strategy_signals'][:3])
+        else:
+            print("No signals generated")
+        
+        # Show orders
+        print("\n--- Orders ---")
+        if results['orders']:
+            for order in results['orders']:
+                print(f"Order: {order.get('symbol')} {order.get('side')} {order.get('quantity')} "
+                      f"- Success: {order.get('success', False)}")
+        else:
+            print("No orders generated")
+        
+        # Get statistics
+        print("\n--- Signal Statistics ---")
+        stats = signal_gen.get_signal_statistics()
+        pprint(stats['execution_stats'])
+        
+    except Exception as e:
+        print(f"Error during signal generation: {e}")
+        import traceback
+        traceback.print_exc()
+    
+    print("\n=== Test Complete ===")

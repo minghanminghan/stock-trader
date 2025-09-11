@@ -25,12 +25,14 @@ class StockPriceLSTM(nn.Module):
     """
     
     def __init__(self,
-                 input_size: int = 20,           # OHLCV + technical indicators
-                 sequence_length: int = 60,       # 60 minutes of history
-                 hidden_size: int = 128,          # LSTM hidden units
-                 num_layers: int = 3,             # LSTM layers
-                 dropout: float = 0.2,            # Dropout rate
-                 prediction_horizons: list = [5, 15, 30, 60]):  # Minutes ahead
+        input_size: int,            # OHLCV + technical indicators
+        sequence_length: int,       # 60 minutes of history
+        hidden_size: int,           # LSTM hidden units
+        num_layers: int,            # LSTM layers
+        dropout: float,             # Dropout rate
+        prediction_horizons: list,  # Minutes ahead
+        **kwargs
+        ):
         """
         Initialize LSTM model for multi-horizon price prediction.
         
@@ -109,14 +111,13 @@ class StockPriceLSTM(nn.Module):
                 nn.Dropout(dropout),
                 nn.Linear(hidden_size // 4, 1)  # Log-variance for uncertainty
             )
-    
-    def forward(self, x: torch.Tensor, return_confidence: bool = True) -> Dict[str, torch.Tensor]:
+
+    def forward(self, x: torch.Tensor) -> Dict[str, torch.Tensor]:
         """
         Forward pass through the model.
         
         Args:
             x: Input tensor of shape (batch_size, sequence_length, input_size)
-            return_confidence: Whether to compute confidence estimates
             
         Returns:
             Dictionary containing predictions and confidence for each horizon
@@ -155,70 +156,21 @@ class StockPriceLSTM(nn.Module):
             price_pred = self.prediction_heads[horizon_key](features)
             outputs[f'price_{horizon_key}'] = price_pred.squeeze(-1)
             
-            if return_confidence:
-                # Confidence prediction (log-variance)
-                log_var = self.confidence_heads[horizon_key](features)
-                
-                # Convert log-variance to confidence (0-1 scale)
-                variance = torch.exp(log_var)
-                confidence = torch.sigmoid(-variance)  # Higher variance = lower confidence
-                outputs[f'confidence_{horizon_key}'] = confidence.squeeze(-1)
-                outputs[f'variance_{horizon_key}'] = variance.squeeze(-1)
+            # Confidence prediction (log-variance)
+            log_var = self.confidence_heads[horizon_key](features)
+            
+            # Clamp log_var to prevent explosion
+            log_var = torch.clamp(log_var, min=-10, max=10)
+            
+            # Convert log-variance to variance with stability
+            variance = torch.exp(log_var)
+            variance = torch.clamp(variance, min=1e-6, max=1e6)
+            
+            confidence = torch.sigmoid(-variance)  # Higher variance = lower confidence
+            outputs[f'confidence_{horizon_key}'] = confidence.squeeze(-1)
+            outputs[f'variance_{horizon_key}'] = variance.squeeze(-1)
         
         return outputs
-    
-    def predict_with_uncertainty(self, x: torch.Tensor, num_samples: int = 100) -> Dict[str, Dict[str, float]]:
-        """
-        Monte Carlo dropout for uncertainty estimation.
-        
-        Args:
-            x: Input tensor for single sample
-            num_samples: Number of MC dropout samples
-            
-        Returns:
-            Dictionary with mean, std, and confidence for each horizon
-        """
-        self.train()  # Enable dropout during inference
-        
-        predictions = {f'{h}min': [] for h in self.prediction_horizons}
-        
-        with torch.no_grad():
-            for _ in range(num_samples):
-                outputs = self.forward(x, return_confidence=False)
-                for horizon in self.prediction_horizons:
-                    horizon_key = f'{horizon}min'
-                    predictions[horizon_key].append(
-                        outputs[f'price_{horizon_key}'].cpu().numpy()
-                    )
-        
-        # Compute statistics
-        results = {}
-        for horizon in self.prediction_horizons:
-            horizon_key = f'{horizon}min'
-            samples = np.array(predictions[horizon_key])
-            
-            results[horizon_key] = {
-                'mean': float(np.mean(samples)),
-                'std': float(np.std(samples)),
-                'confidence': float(1.0 / (1.0 + np.std(samples))),  # Inverse std as confidence
-                'percentile_5': float(np.percentile(samples, 5)),
-                'percentile_95': float(np.percentile(samples, 95))
-            }
-        
-        self.eval()  # Return to eval mode
-        return results
-    
-    def get_model_config(self) -> Dict:
-        """Get model configuration for saving/loading."""
-        return {
-            'input_size': self.input_size,
-            'sequence_length': self.sequence_length,
-            'hidden_size': self.hidden_size,
-            'num_layers': self.num_layers,
-            'dropout': self.dropout,
-            'prediction_horizons': self.prediction_horizons
-        }
-
 
 class StockPriceLoss(nn.Module):
     """
@@ -275,11 +227,17 @@ class StockPriceLoss(nn.Module):
                 # Uncertainty loss (negative log-likelihood)
                 if f'variance_{horizon_key}' in predictions:
                     variance = predictions[f'variance_{horizon_key}']
+                    # Clamp variance to avoid NaN/Inf
+                    variance = torch.clamp(variance, min=1e-6, max=1e6)
                     # Negative log-likelihood for Gaussian
                     uncertainty_loss = 0.5 * (
                         torch.log(variance) + 
                         (price_pred - price_target).pow(2) / variance
                     ).mean()
+                    
+                    # Additional check for NaN
+                    if torch.isnan(uncertainty_loss) or torch.isinf(uncertainty_loss):
+                        uncertainty_loss = 0.0
                 else:
                     uncertainty_loss = 0.0
                 
@@ -292,45 +250,6 @@ class StockPriceLoss(nn.Module):
         return total_loss / max(num_horizons, 1)
 
 
-def create_model(config: Optional[Dict] = None) -> StockPriceLSTM:
-    """
-    Factory function to create LSTM model with default or custom configuration.
-    
-    Args:
-        config: Model configuration dictionary
-        
-    Returns:
-        Initialized LSTM model
-    """
-    if config is None:
-        config = {
-            'input_size': 20,          # OHLCV + 15 technical indicators
-            'sequence_length': 60,      # 60 minutes history
-            'hidden_size': 128,         # LSTM hidden size
-            'num_layers': 3,            # LSTM layers
-            'dropout': 0.2,             # Dropout rate
-            'prediction_horizons': [5, 15, 30, 60]  # Minutes ahead
-        }
-    
-    return StockPriceLSTM(**config)
-
-    #   For High-Frequency Trading:
-    #   config = {
-    #       'sequence_length': 30,    # Shorter memory
-    #       'hidden_size': 64,        # Faster inference
-    #       'num_layers': 2,          # Reduced complexity
-    #       'prediction_horizons': [1, 3, 5, 10]  # Shorter horizons
-    #   }
-
-    #   For Swing Trading:
-    #   config = {
-    #       'sequence_length': 240,   # 4 hours of data
-    #       'hidden_size': 256,       # More capacity
-    #       'num_layers': 4,          # Deeper patterns
-    #       'prediction_horizons': [60, 120, 240, 480]  # Longer horizons
-    #   }
-
-
 def count_parameters(model: nn.Module) -> int:
     """Count trainable parameters in the model."""
     return sum(p.numel() for p in model.parameters() if p.requires_grad)
@@ -338,25 +257,14 @@ def count_parameters(model: nn.Module) -> int:
 
 if __name__ == "__main__":
     # Example usage
-    model = create_model()
+    example_config = {
+        "input_size": 14,
+        "sequence_length": 60,
+        "hidden_size": 128,
+        "num_layers": 3,
+        "dropout": 0.2,
+        "prediction_horizons": [5, 15, 30, 60]
+    }
+    model = StockPriceLSTM(**example_config)
     print(f"Model created with {count_parameters(model):,} trainable parameters")
-    
-    # Test forward pass
-    batch_size = 32
-    seq_length = 60
-    input_size = 20
-    
-    x = torch.randn(batch_size, seq_length, input_size)
-    outputs = model(x)
-    
-    print("\nModel outputs:")
-    for key, tensor in outputs.items():
-        print(f"{key}: {tensor.shape}")
-    
-    # Test uncertainty estimation
-    single_sample = x[:1]  # Single sample
-    uncertainty_results = model.predict_with_uncertainty(single_sample, num_samples=50)
-    
-    print("\nUncertainty estimation:")
-    for horizon, stats in uncertainty_results.items():
-        print(f"{horizon}: mean={stats['mean']:.4f}, std={stats['std']:.4f}, confidence={stats['confidence']:.4f}")
+    print(f"Model structure:\n{model}")

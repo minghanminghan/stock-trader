@@ -10,7 +10,6 @@ from abc import ABC, abstractmethod
 from typing import Dict, List, Optional, Any
 from dataclasses import dataclass, field
 from datetime import datetime
-import pandas as pd
 
 from src.config import TICKERS
 from src.utils.logging_config import logger
@@ -38,8 +37,8 @@ class StrategyConfig:
     max_hold_time_minutes: int = 60        # Maximum hold time
     
     # Signal thresholds
-    buy_threshold: float = 0.6             # Confidence threshold for buy signals
-    sell_threshold: float = 0.6            # Confidence threshold for sell signals
+    buy_threshold: float = 0.5             # Confidence threshold for buy signals
+    sell_threshold: float = 0.5            # Confidence threshold for sell signals
     
     # Risk controls
     max_daily_trades: int = 50             # Maximum trades per day
@@ -92,13 +91,14 @@ class BaseStrategy(ABC):
         logger.info(f"Strategy initialized with {len(config.symbols)} symbols")
     
     @abstractmethod
-    def generate_signals(self, market_data: Dict[str, Any]) -> Dict[str, Dict]:
+    def generate_signals(self, model_predictions: Dict[str, Dict[str, Any]], current_prices: Dict[str, float]) -> Dict[str, Dict]:
         """
-        Generate trading signals based on market data.
-        
+        Generate trading signals based on model predictions and current prices.
+
         Args:
-            market_data: Dictionary containing market data for symbols
-            
+            model_predictions: Dictionary containing model predictions for symbols
+            current_prices: Dictionary containing current prices for symbols
+
         Returns:
             Dict[symbol, signal_dict] where signal_dict contains:
             - action: 'buy', 'sell', 'hold'
@@ -199,7 +199,6 @@ class BaseStrategy(ABC):
             'symbol': symbol,
             'side': side,
             'quantity': abs(position.quantity),
-            'order_type': 'market',
             'metadata': {
                 'action': 'close_position',
                 'realized_pnl': realized_pnl
@@ -245,7 +244,6 @@ class BaseStrategy(ABC):
                 'symbol': symbol,
                 'side': 'sell' if position.side == 'long' else 'buy',
                 'quantity': abs(position.quantity),
-                'order_type': 'market',
                 'metadata': {
                     'action': 'close_position',
                     'signal_confidence': signal.get('confidence', 0.0)
@@ -280,7 +278,6 @@ class BaseStrategy(ABC):
             'symbol': symbol,
             'side': action,
             'quantity': position_size,
-            'order_type': 'market',
             'metadata': {
                 'action': 'open_position',
                 'signal_confidence': confidence,
@@ -352,24 +349,19 @@ class MomentumStrategy(BaseStrategy):
         """Initialize momentum strategy."""
         super().__init__(config)
         logger.info("MomentumStrategy initialized")
-    
-    def generate_signals(self, market_data: Dict[str, Any]) -> Dict[str, Dict]:
+
+    def generate_signals(self, model_predictions: Dict[str, Dict[str, Any]], current_prices: Dict[str, float]) -> Dict[str, Dict]:
         """
         Generate momentum-based trading signals.
         
         Args:
-            market_data: Dict containing:
-                - model_predictions: Dict[symbol, predictions]
-                - current_prices: Dict[symbol, price]
-                - market_indicators: Optional market context
+            - model_predictions: Dict[symbol, predictions]
+            - current_prices: Dict[symbol, price]
                 
         Returns:
             Dict[symbol, signal] with trading signals
         """
         signals = {}
-        
-        model_predictions = market_data.get('model_predictions', {})
-        current_prices = market_data.get('current_prices', {})
         
         for symbol in self.config.symbols:
             if symbol not in model_predictions:
@@ -449,6 +441,8 @@ def create_strategy(strategy_type: str = "momentum", config: Optional[StrategyCo
 
 
 if __name__ == "__main__":
+    from pprint import pprint
+
     # Example usage
     config = StrategyConfig(
         symbols=["SPY", "AAPL"],
@@ -459,21 +453,22 @@ if __name__ == "__main__":
     strategy = create_strategy("momentum", config)
     
     # Example market data
-    market_data = {
-        'model_predictions': {
-            'SPY': {'direction': 'up', 'confidence': 0.8},
-            'AAPL': {'direction': 'down', 'confidence': 0.6}
-        },
-        'current_prices': {
-            'SPY': 450.0,
-            'AAPL': 175.0
-        }
+    model_predictions = {
+        'SPY': {'direction': 'up', 'confidence': 0.8},
+        'AAPL': {'direction': 'down', 'confidence': 0.6}
+    }
+    current_prices = {
+        'SPY': 450.0,
+        'AAPL': 175.0
     }
     
     strategy.start()
-    signals = strategy.generate_signals(market_data)
+    signals = strategy.generate_signals(model_predictions, current_prices)
     orders = strategy.process_signals(signals)
-    
-    print("Generated signals:", signals)
-    print("Generated orders:", orders)
-    print("Strategy status:", strategy.get_status())
+
+    print("Generated signals:")
+    pprint(signals)
+    print("Generated orders:")
+    pprint(orders)
+    print("Strategy status:")
+    pprint(strategy.get_status())

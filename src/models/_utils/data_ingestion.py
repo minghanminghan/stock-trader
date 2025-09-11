@@ -63,5 +63,6 @@ def fetch_stock_data(tickers, start_date, end_date):
 
 if __name__ == '__main__':
     # Example usage:
-    from src.config import TICKERS, START_DATE, END_DATE
-    fetch_stock_data(tickers=TICKERS, start_date=START_DATE, end_date=END_DATE)
+    # from src.config import TICKERS, TRAINING_START_DATE, TRAINING_END_DATE
+    # fetch_stock_data(tickers=TICKERS, start_date=TRAINING_START_DATE, end_date=TRAINING_END_DATE)
+    fetch_stock_data(tickers=["AAPL", "MSFT"], start_date="2023-01-01", end_date="2023-01-02")

@@ -11,7 +11,6 @@ Usage:
 
 import os
 import sys
-import pickle
 import json
 import torch
 import torch.nn as nn
@@ -27,21 +26,22 @@ import matplotlib.pyplot as plt
 # Add project root to path
 sys.path.append(os.path.join(os.path.dirname(__file__), '..', '..', '..'))
 
-from src.config import TICKERS, START_DATE, END_DATE
-from _utils.data_ingestion import fetch_stock_data
-from _utils.feature_engineering import compute_features
-from src.models.lstm.model import StockPriceLSTM, StockPriceLoss, create_model
+from src.config import TICKERS, TRAINING_START_DATE, TRAINING_END_DATE, VALIDATE_START_DATE, VALIDATE_END_DATE, LSTM_CONFIG
+from src.models._utils.data_ingestion import fetch_stock_data
+from src.models._utils.feature_engineering import compute_features
+from src.models.lstm.model import StockPriceLSTM, StockPriceLoss
 from src.utils.logging_config import logger
 
 
 class LSTMDataset(Dataset):
     """Dataset for LSTM training with multi-horizon targets."""
     
-    def __init__(self, 
-                 df: pd.DataFrame, 
-                 sequence_length: int = 60,
-                 prediction_horizons: List[int] = [5, 15, 30, 60],
-                 feature_columns: Optional[List[str]] = None):
+    def __init__(self,
+                name: str,
+                df: pd.DataFrame, 
+                sequence_length: int = 60,
+                prediction_horizons: List[int] = [5, 15, 30, 60],
+                feature_columns: Optional[List[str]] = None):
         """
         Initialize LSTM dataset.
         
@@ -80,6 +80,10 @@ class LSTMDataset(Dataset):
                 # Input sequence
                 sequence = symbol_data.iloc[i-sequence_length:i][self.feature_columns].values
                 
+                # Check for NaN/Inf in sequence
+                if np.isnan(sequence).any() or np.isinf(sequence).any():
+                    continue
+                
                 # Multi-horizon targets
                 current_price = symbol_data.iloc[i-1]['close']
                 horizon_targets = {}
@@ -87,15 +91,18 @@ class LSTMDataset(Dataset):
                 for horizon in prediction_horizons:
                     if i + horizon - 1 < len(symbol_data):
                         future_price = symbol_data.iloc[i + horizon - 1]['close']
+                        # Check for valid price
+                        if pd.isna(future_price) or np.isinf(future_price) or future_price <= 0:
+                            continue
                         horizon_targets[f'price_{horizon}min'] = future_price
                 
-                # Only add if all horizons available
+                # Only add if all horizons available and valid
                 if len(horizon_targets) == len(prediction_horizons):
                     self.samples.append(sequence)
                     self.targets.append(horizon_targets)
-        
-        logger.info(f"Created dataset with {len(self.samples)} samples")
-    
+
+        logger.info(f"Created dataset '{name}' with {len(self.samples)} samples")
+
     def __len__(self):
         return len(self.samples)
     
@@ -105,51 +112,15 @@ class LSTMDataset(Dataset):
             'targets': {k: torch.FloatTensor([v]) for k, v in self.targets[idx].items()}
         }
 
-default_config = {
-    'model': {
-        'input_size': 14,
-        'sequence_length': 60,
-        'hidden_size': 128,
-        'num_layers': 3,
-        'dropout': 0.2,
-        'prediction_horizons': [5, 15, 30, 60]
-    },
-    'training': {
-        'epochs': 100,
-        'batch_size': 64,
-        'validation_split': 0.2,
-        'early_stopping_patience': 20,
-        'gradient_clip_norm': 1.0
-    },
-    'optimizer': {
-        'type': 'adamw',
-        'lr': 0.001,
-        'weight_decay': 1e-5
-    },
-    'scheduler': {
-        'type': 'plateau',
-        'patience': 10,
-        'factor': 0.5
-    },
-    'loss': {
-        'horizon_weights': {
-            '5min': 2.0,
-            '15min': 1.5,
-            '30min': 1.0,
-            '60min': 0.8
-        }
-    }
-}
-
 class LSTMTrainer:
     """Training pipeline for LSTM model."""
     
-    def __init__(self, config: Dict = default_config):
+    def __init__(self, config: Dict):
         """Initialize trainer with configuration."""
         self.config = config
         
         # Model
-        self.model = create_model(self.config['model'])
+        self.model = StockPriceLSTM(**self.config['model'])
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         self.model.to(self.device)
         
@@ -187,29 +158,33 @@ class LSTMTrainer:
         # Training state
         self.train_losses = []
         self.val_losses = []
-        self.best_val_loss = float('inf')
+        self.best_train_loss = float('inf')
         self.epochs_without_improvement = 0
         
         logger.info(f"LSTM Trainer initialized on {self.device}")
         logger.info(f"Model parameters: {sum(p.numel() for p in self.model.parameters() if p.requires_grad):,}")
     
 
-    def prepare_data(self, df: pd.DataFrame) -> Tuple[DataLoader, DataLoader]:
-        """Prepare train and validation data loaders."""
-        logger.info("Preparing training data...")
+    def prepare_data(self, train_df: pd.DataFrame, val_df: pd.DataFrame) -> Tuple[DataLoader, DataLoader]:
+        """Prepare train and validation data loaders with separate datasets."""
+        logger.info("Preparing training and validation data...")
         
-        # Create dataset
-        dataset = LSTMDataset(
-            df,
+        # Create separate datasets for training and validation
+        train_dataset = LSTMDataset(
+            "train_dataset",
+            train_df,
             sequence_length=self.config['model']['sequence_length'],
             prediction_horizons=self.config['model']['prediction_horizons']
         )
         
-        # Train/validation split
-        val_size = int(len(dataset) * self.config['training']['validation_split'])
-        train_size = len(dataset) - val_size
+        val_dataset = LSTMDataset(
+            "val_dataset",
+            val_df,
+            sequence_length=self.config['model']['sequence_length'],
+            prediction_horizons=self.config['model']['prediction_horizons']
+        )
         
-        train_dataset, val_dataset = random_split(dataset, [train_size, val_size])
+        logger.info(f"Training samples: {len(train_dataset)}, Validation samples: {len(val_dataset)}")
         
         # Data loaders
         train_loader = DataLoader(
@@ -228,8 +203,6 @@ class LSTMTrainer:
             pin_memory=True if torch.cuda.is_available() else False
         )
         
-        logger.info(f"Training samples: {len(train_dataset)}, Validation samples: {len(val_dataset)}")
-        
         return train_loader, val_loader
     
     def train_epoch(self, train_loader: DataLoader) -> float:
@@ -243,12 +216,33 @@ class LSTMTrainer:
             features = batch['features'].to(self.device)
             targets = {k: v.squeeze().to(self.device) for k, v in batch['targets'].items()}
             
+            # Debug: Check for NaN/Inf in inputs
+            if torch.isnan(features).any() or torch.isinf(features).any():
+                logger.error(f"NaN/Inf detected in features")
+                continue
+            
+            for k, v in targets.items():
+                if torch.isnan(v).any() or torch.isinf(v).any():
+                    logger.error(f"NaN/Inf detected in target {k}")
+                    continue
+            
             # Forward pass
             self.optimizer.zero_grad()
             predictions = self.model(features)
             
+            # Debug: Check predictions
+            for k, v in predictions.items():
+                if torch.isnan(v).any() or torch.isinf(v).any():
+                    logger.error(f"NaN/Inf detected in predictions {k}")
+                    continue
+            
             # Calculate loss
             loss = self.criterion(predictions, targets)
+            
+            # Debug: Check loss
+            if torch.isnan(loss) or torch.isinf(loss):
+                logger.error(f"NaN/Inf loss detected: {loss.item()}")
+                continue
             
             # Backward pass
             loss.backward()
@@ -319,8 +313,8 @@ class LSTMTrainer:
             )
             
             # Early stopping and model saving
-            if val_loss < self.best_val_loss:
-                self.best_val_loss = val_loss
+            if val_loss < self.best_train_loss:
+                self.best_train_loss = val_loss
                 self.epochs_without_improvement = 0
                 
                 # Save best model
@@ -339,7 +333,7 @@ class LSTMTrainer:
         # Training summary
         summary = {
             'epochs_trained': epoch + 1,
-            'best_val_loss': self.best_val_loss,
+            'best_train_loss': self.best_train_loss,
             'final_train_loss': self.train_losses[-1],
             'final_val_loss': self.val_losses[-1],
             'training_time_minutes': training_time / 60,
@@ -347,7 +341,7 @@ class LSTMTrainer:
         }
         
         logger.info(f"Training completed in {training_time/60:.1f} minutes")
-        logger.info(f"Best validation loss: {self.best_val_loss:.6f}")
+        logger.info(f"Best validation loss: {self.best_train_loss:.6f}")
         
         return summary
     
@@ -365,7 +359,7 @@ class LSTMTrainer:
             'train_losses': self.train_losses,
             'val_losses': self.val_losses,
             'config': self.config,
-            'model_config': self.model.get_model_config()
+            'model_config': self.config
         }, filepath)
     
     def plot_training_curves(self, save_path: str | None):
@@ -396,86 +390,101 @@ def main():
     try:
         # Configuration from config.py
         symbols = TICKERS
-        start_date = START_DATE  # Training start
-        end_date = END_DATE      # Training end
-        
+        train_start = TRAINING_START_DATE
+        train_end = TRAINING_END_DATE
+        val_start = VALIDATE_START_DATE
+        val_end = VALIDATE_END_DATE
+
         logger.info(f"Training configuration:")
         logger.info(f"  Symbols: {symbols}")
-        logger.info(f"  Date range: {start_date} to {end_date}")
+        logger.info(f"  Training range: {train_start} to {train_end}")
+        logger.info(f"  Validation range: {val_start} to {val_end}")
         
         # 1. Data ingestion
         logger.info("Step 1: Data ingestion")
-        fetch_stock_data(tickers=symbols, start_date=start_date, end_date=end_date)
+        fetch_stock_data(tickers=symbols, start_date=train_start, end_date=train_end)
+        fetch_stock_data(tickers=symbols, start_date=val_start, end_date=val_end)
         
-        # 2. Load and combine data
-        logger.info("Step 2: Loading and combining data")
-        all_data = []
+        # 2. Load and combine training data
+        logger.info("Step 2: Loading training data")
+        train_data = []
         
         for symbol in symbols:
             try:
-                file_path = os.path.join("data", f"{symbol}_1min_{start_date}_to_{end_date}.parquet")
+                file_path = os.path.join("data", f"{symbol}_1min_{train_start}_to_{train_end}.parquet")
                 if os.path.exists(file_path):
                     df = pd.read_parquet(file_path)
-                    logger.info(f"Loaded {len(df)} bars for {symbol}")
-                    all_data.append(df)
+                    logger.info(f"Loaded {len(df)} training bars for {symbol}")
+                    train_data.append(df)
                 else:
-                    logger.warning(f"Data file not found: {file_path}")
+                    logger.warning(f"Training data file not found: {file_path}")
             except Exception as e:
-                logger.error(f"Error loading data for {symbol}: {e}")
+                logger.error(f"Error loading training data for {symbol}: {e}")
         
-        if not all_data:
-            raise ValueError("No data loaded for training")
+        if not train_data:
+            raise ValueError("No training data loaded")
         
-        combined_df = pd.concat(all_data)
-        logger.info(f"Combined dataset: {len(combined_df)} total bars")
+        train_df = pd.concat(train_data)
+        logger.info(f"Combined training dataset: {len(train_df)} total bars")
         
-        # 3. Feature engineering
-        logger.info("Step 3: Feature engineering")
-        featured_df = compute_features(combined_df)
+        # 3. Load and combine validation data
+        logger.info("Step 3: Loading validation data")
+        val_data = []
         
-        if featured_df.empty:
-            raise ValueError("Feature computation failed")
+        for symbol in symbols:
+            try:
+                file_path = os.path.join("data", f"{symbol}_1min_{val_start}_to_{val_end}.parquet")
+                if os.path.exists(file_path):
+                    df = pd.read_parquet(file_path)
+                    logger.info(f"Loaded {len(df)} validation bars for {symbol}")
+                    val_data.append(df)
+                else:
+                    logger.warning(f"Validation data file not found: {file_path}")
+            except Exception as e:
+                logger.error(f"Error loading validation data for {symbol}: {e}")
         
-        logger.info(f"Features computed: {len(featured_df)} bars with {len(featured_df.columns)} features")
+        if not val_data:
+            raise ValueError("No validation data loaded")
         
-        # 4. Initialize trainer
-        logger.info("Step 4: Initializing LSTM trainer")
+        val_df = pd.concat(val_data)
+        logger.info(f"Combined validation dataset: {len(val_df)} total bars")
         
-        # Custom config (optional)
-        custom_config = {
-            'model': {
-                'input_size': 14,  # Adjust based on actual features
-                'sequence_length': 60,
-                'hidden_size': 128,
-                'num_layers': 3,
-                'dropout': 0.2,
-                'prediction_horizons': [5, 15, 30, 60]
-            },
-            'training': {
-                'epochs': 100,
-                'batch_size': 64,
-                'validation_split': 0.2,
-                'early_stopping_patience': 20,
-                'gradient_clip_norm': 1.0
-            }
-        }
+        # 4. Feature engineering
+        logger.info("Step 4: Feature engineering for training data")
+        train_featured_df = compute_features(train_df)
         
-        trainer = LSTMTrainer(custom_config)
+        if train_featured_df.empty:
+            raise ValueError("Training feature computation failed")
         
-        # 5. Prepare data
-        logger.info("Step 5: Preparing training data")
-        train_loader, val_loader = trainer.prepare_data(featured_df)
+        logger.info(f"Training features computed: {len(train_featured_df)} bars with {len(train_featured_df.columns)} features")
         
-        # 6. Train model
-        logger.info("Step 6: Training LSTM model")
+        logger.info("Step 5: Feature engineering for validation data")
+        val_featured_df = compute_features(val_df)
+        
+        if val_featured_df.empty:
+            raise ValueError("Validation feature computation failed")
+        
+        logger.info(f"Validation features computed: {len(val_featured_df)} bars with {len(val_featured_df.columns)} features")
+        
+        # 6. Initialize trainer
+        logger.info("Step 6: Initializing LSTM trainer")
+        
+        trainer = LSTMTrainer(LSTM_CONFIG)
+        
+        # 7. Prepare data
+        logger.info("Step 7: Preparing data loaders")
+        train_loader, val_loader = trainer.prepare_data(train_featured_df, val_featured_df)
+        
+        # 8. Train model
+        logger.info("Step 8: Training LSTM model")
         training_summary = trainer.train(train_loader, val_loader)
         
-        # 7. Save final model with timestamp
+        # 9. Save final model with timestamp
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         final_model_path = f"lstm_model_{timestamp}.pth"
-        trainer.save_checkpoint(final_model_path, training_summary['epochs_trained'], training_summary['best_val_loss'])
+        trainer.save_checkpoint(final_model_path, training_summary['epochs_trained'], training_summary['best_train_loss'])
         
-        # 8. Save training summary
+        # 10. Save training summary
         summary_path = f"src/models/lstm/weights/training_summary_{timestamp}.json"
         with open(summary_path, 'w') as f:
             json.dump(training_summary, f, indent=2, default=str)

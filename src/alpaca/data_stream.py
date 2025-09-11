@@ -161,7 +161,7 @@ class LiveDataStream:
         logger.info("Loading initial historical data...")
         
         end_time = datetime.now()
-        start_time = end_time - timedelta(days=2)  # 2 days of history
+        start_time = end_time - timedelta(days=1)  # 1 day of history
         
         # Batch request for all symbols
         try:
@@ -187,7 +187,7 @@ class LiveDataStream:
                             self.data_buffers[symbol].append(bar_data)
                             self.latest_bars[symbol] = bar_data
                         
-                        logger.debug(f"Loaded {len(symbol_bars)} historical bars for {symbol}")
+                        logger.info(f"Loaded {len(symbol_bars)} historical bars for {symbol}")
             
         except Exception as e:
             logger.error(f"Error loading initial historical data: {e}")
