@@ -1,32 +1,31 @@
-# MODEL DEPLOYMENT PIPELINE
-1. redesign
-2. training
-3. evaluation
-4. benchmarking
-5. paper trading
-6. live trading
+# Description
+Algorithmic stock trader built using Pytorch & Alpaca Markets API.
 
-# SYSTEM INFO
-constraints:
-- alpaca markets rate limits (200 requests/min)
-- computer memory limits (~4gb)
-- network limits
+An LSTM model trained to forecast a stock's future prices (5min, 10min, 30min, 60min) given the last 60 minutes of historical data, as well as a confidence measure of its forecast. Additional indicates such as volatility and momentum are also taken into consideration.
 
-system workload:
-- model inference:
-  - #_SYMBOLS predictions/min
-- alpaca api
-  - 1 batch GET requests/min
-  - [0, #_SYMBOLS] POST requests/min
+The trader applies a momentum strategy to make small winning trades within a 5-60 minute window. Position sizing, risk management, and signal thresholds are all taken into consideration and configurable.
+
+The Alpaca Markets API wrapper utilizes websockets for with retries, REST fallback, and graceful degradation. Market updates are received every 30 seconds, and the API key being used is rate limited to 200 API calls/min, which are key constraints to the system's design.
+
+# How to run
+```bash
+git clone https://github.com/minghanminghan/stock-trader
+pip install requirements.txt
+python -m src.main
+```
 
 # TODO
-- patch main: on cold start, fetch prev 60 minutes of data using an api request
-- patch config: split symbols into train_symbols, trade_symbols
-- create unit tests for everything!!!
-- retrain LSTM model on S&P 100 across 3-4 years
-- update tickers in src/config.py
-- look at uuid, seeding random stuff
+- add unit tests
+- retrain LSTM model
+- config: split ‘symbols’ into ‘train_symbols’, ‘test_symbols’
+- add uuid support, initialize random seeding from config
 - create benchmarking tools
-- redo LGBM
-- add prediction models (XGBoost, NN)
-- implement periodic retraining + deployment
+- integrate LGBM model
+- add more models (XGBoost, NN)
+- implement retraining + redeployment
+  - redesign
+  - training
+  - evaluation
+  - benchmarking
+  - paper trading
+  - live trading
