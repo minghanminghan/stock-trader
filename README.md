@@ -11,6 +11,7 @@ The Alpaca Markets API wrapper utilizes websockets for with retries, REST fallba
 ```bash
 git clone https://github.com/minghanminghan/stock-trader
 pip install requirements.txt
+python -m src.model.lstm.training
 python -m src.main
 ```
 
