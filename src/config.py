@@ -1,7 +1,7 @@
 import os
 from dotenv import load_dotenv
 
-# Load environment variables from .env file
+# Load `environment` variables from .env file
 load_dotenv()
 
 
@@ -22,13 +22,16 @@ LOGS_DIR = "logs"
 RANDOM_SEED = 0
 
 # --- Data Configuration ---
-TICKERS = ["AMZN", "META", "NVDA"] # change to S&P 100
-
-TRAINING_START_DATE = "2025-07-01"  # for model training
+TICKERS = [
+    "AAPL", "ADBE", "AMD", "AMZN", "AVGO", "CRM", "CSCO",
+    "GOOG", "GOOGL", "IBM", "INTC", "INTU", "META", "MSFT",
+    "NFLX", "NOW", "NVDA", "ORCL", "PLTR", "PYPL", "QCOM", "TSLA"
+]
+TRAINING_START_DATE = "2025-01-01"  # model training
 TRAINING_END_DATE = "2025-08-31"
 
-VALIDATE_START_DATE = "2025-09-01"      # for model eval
-VALIDATE_END_DATE = "2025-09-03"
+VALIDATE_START_DATE = "2025-09-01"      # model eval
+VALIDATE_END_DATE = "2025-09-15"
 
 
 # --- LSTM Model Configuration ---
@@ -39,31 +42,22 @@ LSTM_CONFIG = {
         'hidden_size': 128,
         'num_layers': 3,
         'dropout': 0.2,
-        'prediction_horizons': [5, 15, 30, 60]
+        'prediction_horizon': 60  # 60-minute prediction
     },
     'training': {
-        'epochs': 5, # 100
-        'batch_size': 64,
-        'validation_split': 0.2,
-        'early_stopping_patience': 20,
-        'gradient_clip_norm': 1.0
+        'epochs': 100,
+        'batch_size': None,  # Will be set dynamically based on available memory
+        'early_stopping_patience': 15,  # Reduced patience
+        'dataset_size_fraction': 1.0,  # Use 100% of data for training (1.0 = full dataset)
     },
     'optimizer': {
         'type': 'adamw',
         'lr': 0.001,
-        'weight_decay': 1e-5
+        'weight_decay': 1e-6  # Reduced weight decay
     },
     'scheduler': {
         'type': 'plateau',
-        'patience': 10,
+        'patience': 8,
         'factor': 0.5
-    },
-    'loss': {
-        'horizon_weights': { # skew to short-term gains
-            '5min': 2.0,
-            '15min': 1.5,
-            '30min': 1.0,
-            '60min': 0.8
-        }
     }
 }

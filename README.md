@@ -10,12 +10,13 @@ The Alpaca Markets API wrapper utilizes websockets for with retries, REST fallba
 # How to run
 ```bash
 git clone https://github.com/minghanminghan/stock-trader
-pip install requirements.txt
+pip install -r requirements.txt
 python -m src.model.lstm.training
 python -m src.main
 ```
 
 # TODO
+- redo training to load data in memory, increase GPU utilization and minimize CPU + IO usage
 - add unit tests
 - retrain LSTM model
 - config: split ‘symbols’ into ‘train_symbols’, ‘test_symbols’

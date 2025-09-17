@@ -1,27 +1,19 @@
 #!/usr/bin/env python3
 """
-LSTM Training Pipeline
-
-Configurable training script for multi-horizon stock price prediction LSTM.
-Reads configuration from config.py and orchestrates complete training workflow.
-
-Usage:
-    python src/models/lstm/training.py
+Simplified LSTM Training Pipeline
+Simple training script for 60-minute horizon stock price prediction LSTM.
 """
 
 import os
 import sys
-import json
 import torch
 import torch.nn as nn
-from torch.utils.data import DataLoader, Dataset, random_split
-from torch.optim import Adam, AdamW
-from torch.optim.lr_scheduler import ReduceLROnPlateau, CosineAnnealingLR
+from torch.utils.data import DataLoader, Dataset
+from torch.optim import AdamW
+from torch.optim.lr_scheduler import ReduceLROnPlateau
 import pandas as pd
 import numpy as np
-from datetime import datetime, timedelta
-from typing import Dict, List, Tuple, Optional
-import matplotlib.pyplot as plt
+from typing import Dict
 
 # Add project root to path
 sys.path.append(os.path.join(os.path.dirname(__file__), '..', '..', '..'))
@@ -29,478 +21,285 @@ sys.path.append(os.path.join(os.path.dirname(__file__), '..', '..', '..'))
 from src.config import TICKERS, TRAINING_START_DATE, TRAINING_END_DATE, VALIDATE_START_DATE, VALIDATE_END_DATE, LSTM_CONFIG
 from src.models._utils.data_ingestion import fetch_stock_data
 from src.models._utils.feature_engineering import compute_features
-from src.models.lstm.model import StockPriceLSTM, StockPriceLoss
+from src.models.lstm.model import StockPriceLSTM
 from src.utils.logging_config import logger
 
 
 class LSTMDataset(Dataset):
-    """Dataset for LSTM training with multi-horizon targets."""
-    
-    def __init__(self,
-                name: str,
-                df: pd.DataFrame, 
-                sequence_length: int = 60,
-                prediction_horizons: List[int] = [5, 15, 30, 60],
-                feature_columns: Optional[List[str]] = None):
-        """
-        Initialize LSTM dataset.
-        
-        Args:
-            df: DataFrame with MultiIndex (symbol, timestamp)
-            sequence_length: Length of input sequences
-            prediction_horizons: Minutes ahead to predict
-            feature_columns: List of feature column names
-        """
-        self.sequence_length = sequence_length
-        self.prediction_horizons = prediction_horizons
-        
-        if feature_columns is None:
-            self.feature_columns = [
-                'open', 'high', 'low', 'close', 'volume',
-                'return_1m', 'mom_5m', 'mom_15m', 'mom_60m',
-                'vol_15m', 'vol_60m', 'vol_zscore',
-                'time_sin', 'time_cos'
-            ]
-        else:
-            self.feature_columns = feature_columns
-        
-        self.samples = []
-        self.targets = []
-        
-        # Process data by symbol
-        for symbol in df.index.get_level_values(0).unique():
-            symbol_data = df.loc[symbol].sort_index()
-            
-            if len(symbol_data) < sequence_length + max(prediction_horizons):
-                logger.warning(f"Insufficient data for {symbol}: {len(symbol_data)} bars")
-                continue
-            
-            # Create sequences
-            for i in range(sequence_length, len(symbol_data) - max(prediction_horizons)):
-                # Input sequence
-                sequence = symbol_data.iloc[i-sequence_length:i][self.feature_columns].values
-                
-                # Check for NaN/Inf in sequence
-                if np.isnan(sequence).any() or np.isinf(sequence).any():
-                    continue
-                
-                # Multi-horizon targets
-                current_price = symbol_data.iloc[i-1]['close']
-                horizon_targets = {}
-                
-                for horizon in prediction_horizons:
-                    if i + horizon - 1 < len(symbol_data):
-                        future_price = symbol_data.iloc[i + horizon - 1]['close']
-                        # Check for valid price
-                        if pd.isna(future_price) or np.isinf(future_price) or future_price <= 0:
-                            continue
-                        horizon_targets[f'price_{horizon}min'] = future_price
-                
-                # Only add if all horizons available and valid
-                if len(horizon_targets) == len(prediction_horizons):
-                    self.samples.append(sequence)
-                    self.targets.append(horizon_targets)
+    """In-memory dataset for LSTM training."""
 
-        logger.info(f"Created dataset '{name}' with {len(self.samples)} samples")
+    def __init__(self, data: pd.DataFrame, sequence_length: int = 60, prediction_horizon: int = 60):
+        self.sequence_length = sequence_length
+        self.prediction_horizon = prediction_horizon
+
+        self.feature_columns = [
+            'open', 'high', 'low', 'close', 'volume',
+            'return_1m', 'mom_5m', 'mom_15m', 'mom_60m',
+            'vol_15m', 'vol_60m', 'vol_zscore',
+            'time_sin', 'time_cos'
+        ]
+
+        self.sequences = []
+        self.targets = []
+
+        self._create_sequences(data)
+
+    def _create_sequences(self, data: pd.DataFrame):
+        """Create sequences from data using vectorized operations."""
+        all_sequences = []
+        all_targets = []
+
+        for symbol in data.index.get_level_values(0).unique():
+            symbol_data = data.loc[symbol].sort_index()
+
+            if len(symbol_data) < self.sequence_length + self.prediction_horizon:
+                continue
+
+            # Extract feature and price arrays for vectorized operations
+            features_array = symbol_data[self.feature_columns].values.astype(np.float32)
+            prices_array = symbol_data['close'].values.astype(np.float32)
+
+            # Calculate valid sequence indices
+            max_start_idx = len(symbol_data) - self.prediction_horizon
+            valid_indices = np.arange(self.sequence_length, max_start_idx)
+
+            if len(valid_indices) == 0:
+                continue
+
+            # Vectorized sequence creation using advanced indexing
+            seq_indices = valid_indices[:, None] - np.arange(self.sequence_length, 0, -1)
+            sequences = features_array[seq_indices]  # Shape: (n_samples, seq_len, n_features)
+
+            # Vectorized target creation
+            target_indices = valid_indices[:, None] + np.arange(1, self.prediction_horizon + 1)
+            # Clip indices to prevent out-of-bounds
+            target_indices = np.clip(target_indices, 0, len(prices_array) - 1)
+            targets = prices_array[target_indices]  # Shape: (n_samples, prediction_horizon)
+
+            # Batch validation - check for NaN values
+            sequence_valid = ~np.isnan(sequences).any(axis=(1, 2))
+            target_valid = ~np.isnan(targets).any(axis=1)
+            valid_mask = sequence_valid & target_valid
+
+            # Filter valid samples
+            if valid_mask.sum() > 0:
+                all_sequences.append(sequences[valid_mask])
+                all_targets.append(targets[valid_mask])
+
+        # Concatenate all valid sequences and targets
+        if all_sequences:
+            self.sequences = np.concatenate(all_sequences, axis=0)
+            self.targets = np.concatenate(all_targets, axis=0)
+        else:
+            self.sequences = np.empty((0, self.sequence_length, len(self.feature_columns)), dtype=np.float32)
+            self.targets = np.empty((0, self.prediction_horizon), dtype=np.float32)
 
     def __len__(self):
-        return len(self.samples)
-    
+        return len(self.sequences)
+
     def __getitem__(self, idx):
         return {
-            'features': torch.FloatTensor(self.samples[idx]),
-            'targets': {k: torch.FloatTensor([v]) for k, v in self.targets[idx].items()}
+            'features': torch.FloatTensor(self.sequences[idx]),
+            'target': torch.FloatTensor(self.targets[idx])
         }
 
-class LSTMTrainer:
-    """Training pipeline for LSTM model."""
-    
-    def __init__(self, config: Dict):
-        """Initialize trainer with configuration."""
-        self.config = config
-        
-        # Model
-        self.model = StockPriceLSTM(**self.config['model'])
-        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-        self.model.to(self.device)
-        
-        # Loss function
-        self.criterion = StockPriceLoss(self.config['loss']['horizon_weights'])
-        
-        # Optimizer
-        if self.config['optimizer']['type'] == 'adam':
-            self.optimizer = Adam(
-                self.model.parameters(),
-                lr=self.config['optimizer']['lr'],
-                weight_decay=self.config['optimizer']['weight_decay']
-            )
-        elif self.config['optimizer']['type'] == 'adamw':
-            self.optimizer = AdamW(
-                self.model.parameters(),
-                lr=self.config['optimizer']['lr'],
-                weight_decay=self.config['optimizer']['weight_decay']
-            )
-        
-        # Scheduler
-        if self.config['scheduler']['type'] == 'plateau':
-            self.scheduler = ReduceLROnPlateau(
-                self.optimizer,
-                mode='min',
-                patience=self.config['scheduler']['patience'],
-                factor=self.config['scheduler']['factor']
-            )
-        elif self.config['scheduler']['type'] == 'cosine':
-            self.scheduler = CosineAnnealingLR(
-                self.optimizer,
-                T_max=self.config['training']['epochs']
-            )
-        
-        # Training state
-        self.train_losses = []
-        self.val_losses = []
-        self.best_train_loss = float('inf')
-        self.epochs_without_improvement = 0
-        
-        logger.info(f"LSTM Trainer initialized on {self.device}")
-        logger.info(f"Model parameters: {sum(p.numel() for p in self.model.parameters() if p.requires_grad):,}")
-    
 
-    def prepare_data(self, train_df: pd.DataFrame, val_df: pd.DataFrame) -> Tuple[DataLoader, DataLoader]:
-        """Prepare train and validation data loaders with separate datasets."""
-        logger.info("Preparing training and validation data...")
-        
-        # Create separate datasets for training and validation
-        train_dataset = LSTMDataset(
-            "train_dataset",
-            train_df,
+class LSTMTrainer:
+    """Simplified training pipeline for LSTM model"""
+
+    def __init__(self, config: Dict):
+        self.config = config
+        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
+        # Model
+        self.model = StockPriceLSTM(
+            input_size=self.config['model']['input_size'],
             sequence_length=self.config['model']['sequence_length'],
-            prediction_horizons=self.config['model']['prediction_horizons']
+            hidden_size=self.config['model']['hidden_size'],
+            num_layers=self.config['model']['num_layers'],
+            dropout=self.config['model']['dropout'],
+            prediction_horizon=self.config['model']['prediction_horizon']
+        ).to(self.device)
+
+        # MSE loss
+        self.criterion = nn.MSELoss()
+
+        # Optimizer
+        self.optimizer = AdamW(
+            self.model.parameters(),
+            lr=self.config['optimizer']['lr'],
+            weight_decay=self.config['optimizer']['weight_decay']
         )
-        
-        val_dataset = LSTMDataset(
-            "val_dataset",
-            val_df,
-            sequence_length=self.config['model']['sequence_length'],
-            prediction_horizons=self.config['model']['prediction_horizons']
+
+        # Scheduler
+        self.scheduler = ReduceLROnPlateau(
+            self.optimizer,
+            mode='min',
+            patience=self.config['scheduler']['patience'],
+            factor=self.config['scheduler']['factor']
         )
-        
-        logger.info(f"Training samples: {len(train_dataset)}, Validation samples: {len(val_dataset)}")
-        
-        # Data loaders
-        train_loader = DataLoader(
-            train_dataset,
-            batch_size=self.config['training']['batch_size'],
-            shuffle=True,
-            num_workers=2,
-            pin_memory=True if torch.cuda.is_available() else False
-        )
-        
-        val_loader = DataLoader(
-            val_dataset,
-            batch_size=self.config['training']['batch_size'],
-            shuffle=False,
-            num_workers=2,
-            pin_memory=True if torch.cuda.is_available() else False
-        )
-        
-        return train_loader, val_loader
-    
+
+        self.best_val_loss = float('inf')
+        self.epochs_without_improvement = 0
+
+        logger.info(f"Trainer initialized on {self.device}")
+        logger.info(f"Model parameters: {sum(p.numel() for p in self.model.parameters()):,}")
+
     def train_epoch(self, train_loader: DataLoader) -> float:
         """Train for one epoch."""
         self.model.train()
         total_loss = 0.0
-        num_batches = 0
-        
+        valid_batches = 0
+
         for batch in train_loader:
-            # Move to device
             features = batch['features'].to(self.device)
-            targets = {k: v.squeeze().to(self.device) for k, v in batch['targets'].items()}
-            
-            # Debug: Check for NaN/Inf in inputs
-            if torch.isnan(features).any() or torch.isinf(features).any():
-                logger.error(f"NaN/Inf detected in features")
-                continue
-            
-            for k, v in targets.items():
-                if torch.isnan(v).any() or torch.isinf(v).any():
-                    logger.error(f"NaN/Inf detected in target {k}")
-                    continue
-            
-            # Forward pass
+            targets = batch['target'].to(self.device)
+
             self.optimizer.zero_grad()
+
+            # Forward pass
             predictions = self.model(features)
-            
-            # Debug: Check predictions
-            for k, v in predictions.items():
-                if torch.isnan(v).any() or torch.isinf(v).any():
-                    logger.error(f"NaN/Inf detected in predictions {k}")
-                    continue
-            
-            # Calculate loss
-            loss = self.criterion(predictions, targets)
-            
-            # Debug: Check loss
-            if torch.isnan(loss) or torch.isinf(loss):
-                logger.error(f"NaN/Inf loss detected: {loss.item()}")
-                continue
-            
+            loss = self.criterion(predictions['price'], targets)
+
             # Backward pass
             loss.backward()
-            
-            # Gradient clipping
-            if self.config['training']['gradient_clip_norm'] > 0:
-                torch.nn.utils.clip_grad_norm_(
-                    self.model.parameters(),
-                    self.config['training']['gradient_clip_norm']
-                )
-            
             self.optimizer.step()
-            
+
             total_loss += loss.item()
-            num_batches += 1
-        
-        return total_loss / num_batches
-    
+            valid_batches += 1
+
+        return total_loss / max(valid_batches, 1)
+
     def validate_epoch(self, val_loader: DataLoader) -> float:
         """Validate for one epoch."""
         self.model.eval()
         total_loss = 0.0
-        num_batches = 0
-        
+        valid_batches = 0
+
         with torch.no_grad():
             for batch in val_loader:
                 features = batch['features'].to(self.device)
-                targets = {k: v.squeeze().to(self.device) for k, v in batch['targets'].items()}
-                
+                targets = batch['target'].to(self.device)
+
                 predictions = self.model(features)
-                loss = self.criterion(predictions, targets)
-                
+                loss = self.criterion(predictions['price'], targets)
+
                 total_loss += loss.item()
-                num_batches += 1
-        
-        return total_loss / num_batches
-    
+                valid_batches += 1
+
+        return total_loss / max(valid_batches, 1)
+
     def train(self, train_loader: DataLoader, val_loader: DataLoader) -> Dict:
         """Complete training loop."""
-        logger.info("Starting LSTM training...")
-        
-        training_start = datetime.now()
-        
+        logger.info("Starting simplified LSTM training...")
+
         for epoch in range(self.config['training']['epochs']):
-            epoch_start = datetime.now()
-            
-            # Training
             train_loss = self.train_epoch(train_loader)
             val_loss = self.validate_epoch(val_loader)
-            
-            # Learning rate scheduling
-            if isinstance(self.scheduler, ReduceLROnPlateau):
-                self.scheduler.step(val_loss)
-            elif isinstance(self.scheduler, CosineAnnealingLR):
-                self.scheduler.step()
-            
-            # Record losses
-            self.train_losses.append(train_loss)
-            self.val_losses.append(val_loss)
-            
-            epoch_time = (datetime.now() - epoch_start).total_seconds()
-            current_lr = self.optimizer.param_groups[0]['lr']
-            
-            logger.info(
-                f"Epoch {epoch+1}/{self.config['training']['epochs']} - "
-                f"Train Loss: {train_loss:.6f}, Val Loss: {val_loss:.6f}, "
-                f"LR: {current_lr:.8f}, Time: {epoch_time:.1f}s"
-            )
-            
-            # Early stopping and model saving
-            if val_loss < self.best_train_loss:
-                self.best_train_loss = val_loss
+
+            self.scheduler.step(val_loss)
+
+            if epoch % 10 == 0:  # Log every 10 epochs
+                logger.info(f"Epoch {epoch}: Train Loss: {train_loss:.4f}, Val Loss: {val_loss:.4f}")
+
+            # Early stopping
+            if val_loss < self.best_val_loss:
+                self.best_val_loss = val_loss
                 self.epochs_without_improvement = 0
-                
-                # Save best model
-                self.save_checkpoint('best_lstm_model.pth', epoch, val_loss)
-                logger.info(f"New best model saved (val_loss: {val_loss:.6f})")
-                
+                self.save_checkpoint('best_lstm_model.pth')
             else:
                 self.epochs_without_improvement += 1
-                
+
                 if self.epochs_without_improvement >= self.config['training']['early_stopping_patience']:
-                    logger.info(f"Early stopping triggered after {epoch+1} epochs")
+                    logger.info(f"Early stopping at epoch {epoch}")
                     break
-        
-        training_time = (datetime.now() - training_start).total_seconds()
-        
-        # Training summary
-        summary = {
-            'epochs_trained': epoch + 1,
-            'best_train_loss': self.best_train_loss,
-            'final_train_loss': self.train_losses[-1],
-            'final_val_loss': self.val_losses[-1],
-            'training_time_minutes': training_time / 60,
-            'config': self.config
-        }
-        
-        logger.info(f"Training completed in {training_time/60:.1f} minutes")
-        logger.info(f"Best validation loss: {self.best_train_loss:.6f}")
-        
-        return summary
-    
-    def save_checkpoint(self, filename: str, epoch: int, val_loss: float):
+
+        return {'best_val_loss': self.best_val_loss, 'epochs_trained': epoch + 1}
+
+    def save_checkpoint(self, filename: str):
         """Save model checkpoint."""
         os.makedirs('src/models/lstm/weights', exist_ok=True)
         filepath = os.path.join('src/models/lstm/weights', filename)
-        
+
         torch.save({
-            'epoch': epoch,
             'model_state_dict': self.model.state_dict(),
-            'optimizer_state_dict': self.optimizer.state_dict(),
-            'scheduler_state_dict': self.scheduler.state_dict(),
-            'val_loss': val_loss,
-            'train_losses': self.train_losses,
-            'val_losses': self.val_losses,
-            'config': self.config,
-            'model_config': self.config
+            'config': self.config
         }, filepath)
-    
-    def plot_training_curves(self, save_path: str | None):
-        """Plot training and validation loss curves."""
-        plt.figure(figsize=(10, 6))
-        
-        epochs = range(1, len(self.train_losses) + 1)
-        plt.plot(epochs, self.train_losses, 'b-', label='Training Loss')
-        plt.plot(epochs, self.val_losses, 'r-', label='Validation Loss')
-        
-        plt.xlabel('Epoch')
-        plt.ylabel('Loss')
-        plt.title('LSTM Training Progress')
-        plt.legend()
-        plt.grid(True, alpha=0.3)
-        
-        if save_path:
-            plt.savefig(save_path, dpi=300, bbox_inches='tight')
-            logger.info(f"Training curves saved to {save_path}")
-        
-        plt.show()
+
+
+def load_data(symbols, start_date: str, end_date: str) -> pd.DataFrame:
+    """Load and process data for all symbols."""
+    dataframes = []
+
+    for symbol in symbols:
+        try:
+            file_path = os.path.join("data", f"{symbol}_1min_{start_date}_to_{end_date}.parquet")
+            if not os.path.exists(file_path):
+                logger.warning(f"File not found: {file_path}")
+                continue
+
+            df = pd.read_parquet(file_path)
+            featured_df = compute_features(df)
+
+            if not featured_df.empty:
+                dataframes.append(featured_df)
+
+        except Exception as e:
+            logger.error(f"Error processing {symbol}: {e}")
+            continue
+
+    if not dataframes:
+        raise ValueError("No data loaded")
+
+    return pd.concat(dataframes, axis=0)
 
 
 def main():
-    """Main training pipeline."""
     logger.info("Starting LSTM training pipeline...")
-    
-    try:
-        # Configuration from config.py
-        symbols = TICKERS
-        train_start = TRAINING_START_DATE
-        train_end = TRAINING_END_DATE
-        val_start = VALIDATE_START_DATE
-        val_end = VALIDATE_END_DATE
 
-        logger.info(f"Training configuration:")
-        logger.info(f"  Symbols: {symbols}")
-        logger.info(f"  Training range: {train_start} to {train_end}")
-        logger.info(f"  Validation range: {val_start} to {val_end}")
-        
+    try:
         # 1. Data ingestion
-        logger.info("Step 1: Data ingestion")
-        fetch_stock_data(tickers=symbols, start_date=train_start, end_date=train_end)
-        fetch_stock_data(tickers=symbols, start_date=val_start, end_date=val_end)
-        
-        # 2. Load and combine training data
-        logger.info("Step 2: Loading training data")
-        train_data = []
-        
-        for symbol in symbols:
-            try:
-                file_path = os.path.join("data", f"{symbol}_1min_{train_start}_to_{train_end}.parquet")
-                if os.path.exists(file_path):
-                    df = pd.read_parquet(file_path)
-                    logger.info(f"Loaded {len(df)} training bars for {symbol}")
-                    train_data.append(df)
-                else:
-                    logger.warning(f"Training data file not found: {file_path}")
-            except Exception as e:
-                logger.error(f"Error loading training data for {symbol}: {e}")
-        
-        if not train_data:
-            raise ValueError("No training data loaded")
-        
-        train_df = pd.concat(train_data)
-        logger.info(f"Combined training dataset: {len(train_df)} total bars")
-        
-        # 3. Load and combine validation data
-        logger.info("Step 3: Loading validation data")
-        val_data = []
-        
-        for symbol in symbols:
-            try:
-                file_path = os.path.join("data", f"{symbol}_1min_{val_start}_to_{val_end}.parquet")
-                if os.path.exists(file_path):
-                    df = pd.read_parquet(file_path)
-                    logger.info(f"Loaded {len(df)} validation bars for {symbol}")
-                    val_data.append(df)
-                else:
-                    logger.warning(f"Validation data file not found: {file_path}")
-            except Exception as e:
-                logger.error(f"Error loading validation data for {symbol}: {e}")
-        
-        if not val_data:
-            raise ValueError("No validation data loaded")
-        
-        val_df = pd.concat(val_data)
-        logger.info(f"Combined validation dataset: {len(val_df)} total bars")
-        
-        # 4. Feature engineering
-        logger.info("Step 4: Feature engineering for training data")
-        train_featured_df = compute_features(train_df)
-        
-        if train_featured_df.empty:
-            raise ValueError("Training feature computation failed")
-        
-        logger.info(f"Training features computed: {len(train_featured_df)} bars with {len(train_featured_df.columns)} features")
-        
-        logger.info("Step 5: Feature engineering for validation data")
-        val_featured_df = compute_features(val_df)
-        
-        if val_featured_df.empty:
-            raise ValueError("Validation feature computation failed")
-        
-        logger.info(f"Validation features computed: {len(val_featured_df)} bars with {len(val_featured_df.columns)} features")
-        
-        # 6. Initialize trainer
-        logger.info("Step 6: Initializing LSTM trainer")
-        
+        fetch_stock_data(tickers=TICKERS, start_date=TRAINING_START_DATE, end_date=TRAINING_END_DATE)
+        fetch_stock_data(tickers=TICKERS, start_date=VALIDATE_START_DATE, end_date=VALIDATE_END_DATE)
+
+        # 2. Load and process data
+        logger.info("Loading training data...")
+        train_data = load_data(TICKERS, TRAINING_START_DATE, TRAINING_END_DATE)
+
+        logger.info("Loading validation data...")
+        val_data = load_data(TICKERS, VALIDATE_START_DATE, VALIDATE_END_DATE)
+
+        # 3. Create datasets
+        train_dataset = LSTMDataset(
+            train_data,
+            sequence_length=LSTM_CONFIG['model']['sequence_length'],
+            prediction_horizon=LSTM_CONFIG['model']['prediction_horizon']
+        )
+
+        val_dataset = LSTMDataset(
+            val_data,
+            sequence_length=LSTM_CONFIG['model']['sequence_length'],
+            prediction_horizon=LSTM_CONFIG['model']['prediction_horizon']
+        )
+
+        logger.info(f"Training samples: {len(train_dataset)}, Validation samples: {len(val_dataset)}")
+
+        # 4. Create data loaders
+        batch_size = 32
+        train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
+        val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
+
+        # 5. Train model
         trainer = LSTMTrainer(LSTM_CONFIG)
-        
-        # 7. Prepare data
-        logger.info("Step 7: Preparing data loaders")
-        train_loader, val_loader = trainer.prepare_data(train_featured_df, val_featured_df)
-        
-        # 8. Train model
-        logger.info("Step 8: Training LSTM model")
-        training_summary = trainer.train(train_loader, val_loader)
-        
-        # 9. Save final model with timestamp
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        final_model_path = f"lstm_model_{timestamp}.pth"
-        trainer.save_checkpoint(final_model_path, training_summary['epochs_trained'], training_summary['best_train_loss'])
-        
-        # 10. Save training summary
-        summary_path = f"src/models/lstm/weights/training_summary_{timestamp}.json"
-        with open(summary_path, 'w') as f:
-            json.dump(training_summary, f, indent=2, default=str)
-        
-        # 9. Plot training curves
-        plot_path = f"src/models/lstm/weights/training_curves_{timestamp}.png"
-        trainer.plot_training_curves(plot_path)
-        
-        logger.info("LSTM training pipeline completed successfully!")
-        logger.info(f"Best model: src/models/lstm/weights/{final_model_path}")
-        logger.info(f"Training summary: {summary_path}")
-        
+        summary = trainer.train(train_loader, val_loader)
+
+        logger.info("Training completed successfully!")
+        logger.info(f"Best validation loss: {summary['best_val_loss']:.4f}")
+
         return 0
-        
+
     except Exception as e:
-        logger.error(f"Training pipeline failed: {e}")
+        logger.error(f"Training failed: {e}")
         return 1
 
 

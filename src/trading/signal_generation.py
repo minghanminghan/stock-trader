@@ -27,91 +27,172 @@ from src.utils.logging_config import logger
 
 class PredictionAdapter:
     """
-    Converts multi-horizon LSTM predictions to strategy-compatible format.
-    
-    Handles aggregation across time horizons and converts price predictions
-    to directional signals with confidence scores.
+    Converts 60-minute sequence LSTM predictions to strategy-compatible format.
+
+    Handles aggregation across the 60-minute prediction sequence and converts
+    price predictions to directional signals with confidence scores.
     """
-    
-    def __init__(self, 
-                 horizon_weights: Dict[str, float],
-                 min_return_threshold: float):
+
+    def __init__(self,
+                 horizon_weights: Optional[Dict[int, float]] = None,
+                 min_return_threshold: float = 0.001):
         """
         Initialize prediction adapter.
-        
+
         Args:
-            horizon_weights: Weights for different prediction horizons
+            horizon_weights: Weights for different minute horizons (e.g., {5: 0.3, 15: 0.4, 30: 0.2, 60: 0.1})
             min_return_threshold: Minimum return threshold for signal generation
         """
-        self.horizon_weights = horizon_weights
+        # Default weights favoring shorter horizons
+        self.horizon_weights = horizon_weights or {
+            5: 0.4,   # 5-minute horizon (highest weight)
+            15: 0.3,  # 15-minute horizon
+            30: 0.2,  # 30-minute horizon
+            60: 0.1   # 60-minute horizon (lowest weight)
+        }
         self.min_return_threshold = min_return_threshold
-    
-    def convert_predictions(self, 
-                          lstm_predictions: Dict[str, Dict[str, Dict[str, float]]],
+
+    def convert_predictions(self,
+                          lstm_predictions: Dict[str, Dict[str, np.ndarray]],
                           current_prices: Dict[str, float]) -> Dict[str, Dict[str, Any]]:
         """
-        Convert LSTM multi-horizon predictions to strategy format.
-        
+        Convert LSTM 60-minute sequence predictions to strategy format.
+
         Args:
-            lstm_predictions: LSTM output {symbol -> horizon -> prediction_data}
+            lstm_predictions: LSTM output {symbol -> {'price': array[60], 'confidence': array[60]}}
             current_prices: Current prices {symbol -> price}
-            
+
         Returns:
             Strategy format {symbol -> {direction, confidence, expected_return}}
         """
         adapted_predictions = {}
-        
-        for symbol, horizon_predictions in lstm_predictions.items():
-            if not horizon_predictions:
+
+        for symbol, predictions in lstm_predictions.items():
+            if not predictions or 'price' not in predictions:
                 continue
-                
+
             current_price = current_prices.get(symbol, 0.0)
             if current_price <= 0:
                 continue
-            
-            # Calculate weighted predictions across horizons
+
+            price_sequence = predictions['price']
+            confidence_sequence = predictions.get('confidence', np.ones_like(price_sequence) * 0.5)
+
+            # Ensure we have valid sequences
+            if len(price_sequence) != 60 or len(confidence_sequence) != 60:
+                continue
+
+            # Calculate weighted predictions across different horizons
             weighted_return = 0.0
             weighted_confidence = 0.0
             total_weight = 0.0
-            
-            for horizon_key, pred_data in horizon_predictions.items():
-                if horizon_key not in self.horizon_weights:
+
+            for horizon_minutes, weight in self.horizon_weights.items():
+                if horizon_minutes > len(price_sequence):
                     continue
-                    
-                predicted_price = pred_data.get('price', current_price)
-                confidence = pred_data.get('confidence', 0.0)
-                weight = self.horizon_weights[horizon_key]
-                
-                # Calculate expected return
+
+                # Get prediction at specific horizon (1-indexed to 60)
+                horizon_idx = horizon_minutes - 1
+                predicted_price = float(price_sequence[horizon_idx])
+                confidence = float(confidence_sequence[horizon_idx])
+
+                # Skip invalid predictions
+                if np.isnan(predicted_price) or np.isnan(confidence):
+                    continue
+
+                # Calculate expected return for this horizon
                 expected_return = (predicted_price - current_price) / current_price
-                
+
                 weighted_return += weight * expected_return
                 weighted_confidence += weight * confidence
                 total_weight += weight
-            
+
             if total_weight == 0:
                 continue
-            
+
             # Normalize by total weight
             avg_return = weighted_return / total_weight
             avg_confidence = weighted_confidence / total_weight
-            
+
+            # Additional analysis: trend direction over the sequence
+            price_trend = self._analyze_price_trend(price_sequence, current_price)
+            confidence_trend = self._analyze_confidence_trend(confidence_sequence)
+
+            # Combine weighted return with trend analysis
+            final_confidence = (avg_confidence + confidence_trend) / 2
+            final_return = (avg_return + price_trend) / 2
+
             # Determine direction based on expected return
-            if abs(avg_return) < self.min_return_threshold:
+            if abs(final_return) < self.min_return_threshold:
                 direction = 'hold'
-            elif avg_return > 0:
+            elif final_return > 0:
                 direction = 'up'
             else:
                 direction = 'down'
-            
+
             adapted_predictions[symbol] = {
                 'direction': direction,
-                'confidence': avg_confidence,
-                'expected_return': avg_return,
-                'current_price': current_price
+                'confidence': final_confidence,
+                'expected_return': final_return,
+                'current_price': current_price,
+                'horizon_analysis': {
+                    'weighted_return': avg_return,
+                    'trend_return': price_trend,
+                    'avg_confidence': avg_confidence,
+                    'trend_confidence': confidence_trend
+                }
             }
-        
+
         return adapted_predictions
+
+    def _analyze_price_trend(self, price_sequence: np.ndarray, current_price: float) -> float:
+        """
+        Analyze the overall trend direction of the price sequence.
+
+        Args:
+            price_sequence: Array of 60 predicted prices
+            current_price: Current price for comparison
+
+        Returns:
+            Trend return (-1 to 1, negative=downtrend, positive=uptrend)
+        """
+        try:
+            # Calculate returns across the sequence
+            returns = np.diff(price_sequence) / price_sequence[:-1]
+
+            # Calculate trend strength (average return)
+            trend_return = np.mean(returns)
+
+            # Also consider final vs current price
+            final_return = (price_sequence[-1] - current_price) / current_price
+
+            # Combine trend and final return (70% trend, 30% final)
+            combined_return = 0.7 * trend_return + 0.3 * final_return
+
+            return float(np.clip(combined_return, -1.0, 1.0))
+
+        except Exception:
+            return 0.0
+
+    def _analyze_confidence_trend(self, confidence_sequence: np.ndarray) -> float:
+        """
+        Analyze the overall confidence trend.
+
+        Args:
+            confidence_sequence: Array of 60 confidence values
+
+        Returns:
+            Average confidence (0 to 1)
+        """
+        try:
+            # Calculate average confidence, giving more weight to later predictions
+            weights = np.linspace(0.5, 1.0, len(confidence_sequence))
+            weighted_confidence = np.average(confidence_sequence, weights=weights)
+
+            return float(np.clip(weighted_confidence, 0.0, 1.0))
+
+        except Exception:
+            return 0.5
 
 
 class SignalGenerator:
@@ -152,9 +233,9 @@ class SignalGenerator:
             logger.error(f"Failed to initialize LSTM predictor: {e}")
             self.predictor = None
         
-        # Initialize prediction adapter with lower threshold for more signals
+        # Initialize prediction adapter for 60-minute sequence predictions
         self.adapter = PredictionAdapter(
-            horizon_weights=LSTM_CONFIG['loss']['horizon_weights'],
+            horizon_weights={5: 0.4, 15: 0.3, 30: 0.2, 60: 0.1},  # Weights for different minute horizons
             min_return_threshold=0.001  # strategy_config.take_profit_pct
         )
         

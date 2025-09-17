@@ -6,6 +6,9 @@
 .claude
 CLAUDE.md
 
+#
+.vscode/
+
 # pytest
 .pytest_cache
 __pycache__/
