@@ -34,6 +34,15 @@ VALIDATE_START_DATE = "2025-09-01"      # model eval
 VALIDATE_END_DATE = "2025-09-15"
 
 
+# --- Backtesting Configuration ---
+BACKTESTING_TICKERS = [
+    "AAPL", "ADBE", "AMD", "AMZN", "AVGO", "CRM", "CSCO",
+    "GOOG", "GOOGL", "IBM", "INTC", "INTU", "META", "MSFT",
+    "NFLX", "NOW", "NVDA", "ORCL", "PLTR", "PYPL", "QCOM", "TSLA"
+]
+BACKTESTING_START_DATE = "2025-09-01"
+BACKTESTING_END_DATE = "2025-09-15"
+
 # --- LSTM Model Configuration ---
 LSTM_CONFIG = {
     'model': {

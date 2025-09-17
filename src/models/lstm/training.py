@@ -199,8 +199,7 @@ class LSTMTrainer:
 
             self.scheduler.step(val_loss)
 
-            if epoch % 10 == 0:  # Log every 10 epochs
-                logger.info(f"Epoch {epoch}: Train Loss: {train_loss:.4f}, Val Loss: {val_loss:.4f}")
+            logger.info(f"Epoch {epoch}: Train Loss: {train_loss:.4f}, Val Loss: {val_loss:.4f}")
 
             # Early stopping
             if val_loss < self.best_val_loss:
@@ -209,10 +208,6 @@ class LSTMTrainer:
                 self.save_checkpoint('best_lstm_model.pth')
             else:
                 self.epochs_without_improvement += 1
-
-                if self.epochs_without_improvement >= self.config['training']['early_stopping_patience']:
-                    logger.info(f"Early stopping at epoch {epoch}")
-                    break
 
         return {'best_val_loss': self.best_val_loss, 'epochs_trained': epoch + 1}
 

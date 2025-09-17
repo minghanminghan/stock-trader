@@ -37,8 +37,8 @@ class StrategyConfig:
     max_hold_time_minutes: int = 60        # Maximum hold time
     
     # Signal thresholds
-    buy_threshold: float = 0.5             # Confidence threshold for buy signals
-    sell_threshold: float = 0.5            # Confidence threshold for sell signals
+    buy_threshold: float = 0.01             # Confidence threshold for buy signals
+    sell_threshold: float = 0.01            # Confidence threshold for sell signals
     
     # Risk controls
     max_daily_trades: int = 50             # Maximum trades per day

@@ -20,7 +20,6 @@ import numpy as np
 from src.models.lstm.predictor import LSTMPredictor
 from src.trading.strategy import StrategyConfig, create_strategy, BaseStrategy
 from src.alpaca.broker import AlpacaBroker, OrderRequest, create_buy_order, create_sell_order
-from src.alpaca.data_stream import LiveDataStream
 from src.config import TICKERS, LSTM_CONFIG
 from src.utils.logging_config import logger
 

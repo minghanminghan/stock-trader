@@ -82,7 +82,7 @@ class LSTMPredictor:
             self.model.eval()
             
             logger.info(f"Loaded LSTM model with {sum(p.numel() for p in self.model.parameters()):,} parameters")
-            logger.info(f"Model prediction horizons: {self.model.prediction_horizons}")
+            logger.info(f"Model prediction horizon: {self.model.prediction_horizon} minutes (60-element sequence)")
             
         except Exception as e:
             logger.error(f"Failed to load LSTM model: {e}")
@@ -107,15 +107,15 @@ class LSTMPredictor:
         latest_model = max(model_files, key=lambda p: p.stat().st_mtime)
         return str(latest_model)
     
-    def predict_prices(self, market_data: pd.DataFrame) -> Dict[str, Dict[str, float]]:
+    def predict_prices(self, market_data: pd.DataFrame) -> Dict[str, Dict[str, any]]:
         """
-        Generate multi-horizon price predictions with native model confidence using batch processing.
-        
+        Generate 60-minute sequence price predictions with confidence using batch processing.
+
         Args:
             market_data: DataFrame with OHLCV data and MultiIndex (symbol, timestamp)
-            
+
         Returns:
-            Dict mapping symbol -> horizon -> {price, confidence, variance}
+            Dict mapping symbol -> {price: array[60], confidence: array[60], variance: array[60]}
         """
         predictions = {}
         
@@ -168,41 +168,16 @@ class LSTMPredictor:
                 
                 # Split batch results by symbol
                 for i, symbol in enumerate(symbols):
-                    symbol_predictions = {}
-                    
-                    for horizon in self.model.prediction_horizons:
-                        horizon_key = f'{horizon}min'
-                        price_key = f'price_{horizon_key}'
-                        
-                        if price_key not in batch_outputs:
-                            logger.error(f"Missing price key {price_key} in batch outputs")
-                            continue
-                        
-                        # Extract prediction for this symbol from batch
-                        price_pred = batch_outputs[price_key][i].cpu().item()
-                        
-                        result_dict = {'price': price_pred}
-                        
-                        # Extract confidence and variance if available
-                        confidence_key = f'confidence_{horizon_key}'
-                        variance_key = f'variance_{horizon_key}'
-                        
-                        if confidence_key in batch_outputs and variance_key in batch_outputs:
-                            confidence = batch_outputs[confidence_key][i].cpu().item()
-                            variance = batch_outputs[variance_key][i].cpu().item()
-                            result_dict.update({
-                                'confidence': confidence,
-                                'variance': variance
-                            })
-                        else:
-                            result_dict.update({
-                                'confidence': 0.5,
-                                'variance': 1.0
-                            })
-                        
-                        symbol_predictions[horizon_key] = result_dict
-                    
-                    predictions[symbol] = symbol_predictions
+                    # Extract 60-element sequences for this symbol
+                    price_sequence = batch_outputs['price'][i].cpu().numpy()  # Shape: (60,)
+                    confidence_sequence = batch_outputs['confidence'][i].cpu().numpy()  # Shape: (60,)
+                    variance_sequence = batch_outputs['variance'][i].cpu().numpy()  # Shape: (60,)
+
+                    predictions[symbol] = {
+                        'price': price_sequence,
+                        'confidence': confidence_sequence,
+                        'variance': variance_sequence
+                    }
                 
         except Exception as e:
             logger.error(f"Error in batch price prediction: {e}")
@@ -251,19 +226,15 @@ class LSTMPredictor:
             return None
     
     
-    def _get_fallback_prediction(self) -> Dict[str, Dict[str, float]]:
+    def _get_fallback_prediction(self) -> Dict[str, np.ndarray]:
         """Get fallback prediction when normal processing fails."""
         logger.warning("Using fallback prediction due to model failure")
-        fallback = {}
-        for horizon in self.model.prediction_horizons:
-            horizon_key = f'{horizon}min'
-            # Use reasonable market-like values instead of zeros
-            fallback[horizon_key] = {
-                'price': 100.0,  # Reasonable stock price
-                'confidence': 0.1,  # Low confidence
-                'variance': 25.0  # High uncertainty
-            }
-        return fallback
+        # Create 60-element sequences with reasonable market-like values
+        return {
+            'price': np.full(60, 100.0, dtype=np.float32),  # Flat price sequence
+            'confidence': np.full(60, 0.1, dtype=np.float32),  # Low confidence
+            'variance': np.full(60, 25.0, dtype=np.float32)  # High uncertainty
+        }
     
     def get_model_info(self) -> Dict:
         """Get model configuration and metadata."""
@@ -271,7 +242,7 @@ class LSTMPredictor:
             'model_path': self.model_path,
             'device': str(self.device),
             'config': self.model_config,
-            'prediction_horizons': self.model.prediction_horizons if self.model else [],
+            'prediction_horizon': self.model.prediction_horizon if self.model else 60,
             'input_features': self.feature_columns,
             'model_parameters': sum(p.numel() for p in self.model.parameters()) if self.model else 0
         }
