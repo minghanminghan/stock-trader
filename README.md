@@ -16,9 +16,10 @@ python -m src.main
 ```
 
 # TODO
-- redo training to load data in memory, increase GPU utilization and minimize CPU + IO usage
-- add unit tests
+- add good unit tests
 - retrain LSTM model
+  - simplify prediction: either positive, negative, or neutral
+  - strategy: buy and hold for entire day
 - config: split ‘symbols’ into ‘train_symbols’, ‘test_symbols’
 - add uuid support, initialize random seeding from config
 - create benchmarking tools

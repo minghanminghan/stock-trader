@@ -122,7 +122,7 @@ def preprocess_data(data: pd.DataFrame) -> pd.DataFrame: # maybe convert to torc
 
     # Volume features
     df["volume_ma_20"] = df['volume'].rolling(20).mean()
-    df["volume_ma_ratio"] = df['volume'] / df["volume_ma_20"]
+    df["volume_ma_ratio"] = df['volume'] / df["volume_ma_20"].replace(0, np.nan)
     df["price_volume_corr"] = df["return_1d"].rolling(20).corr(df['volume'].pct_change())
 
     # Technical indicators
@@ -130,12 +130,12 @@ def preprocess_data(data: pd.DataFrame) -> pd.DataFrame: # maybe convert to torc
     delta = df['close'].diff()
     gain = (delta.where(delta > 0, 0)).rolling(14).mean()
     loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
-    rs = gain / loss
+    rs = gain / loss.replace(0, np.nan)
     df["rsi_14"] = 100 - (100 / (1 + rs))
 
     # Moving average distance
     df["sma_20"] = df['close'].rolling(20).mean()
-    df["ma_distance"] = (df['close'] - df["sma_20"]) / df["sma_20"]
+    df["ma_distance"] = (df['close'] - df["sma_20"]) / df["sma_20"].replace(0, np.nan)
 
     # MACD
     ema_12 = df['close'].ewm(span=12).mean()
@@ -144,7 +144,7 @@ def preprocess_data(data: pd.DataFrame) -> pd.DataFrame: # maybe convert to torc
     macd_signal = macd_line.ewm(span=9).mean()
     df["macd_signal"] = macd_line - macd_signal
 
-    # Select final feature columns (16 total)
+    # Select final feature columns (18 total)
     feature_cols = [
         "log_close", "log1p_volume", "log1p_trades", "close_vwap_diff",
         "dow_sin", "dow_cos", "dom_sin", "dom_cos",
@@ -152,7 +152,12 @@ def preprocess_data(data: pd.DataFrame) -> pd.DataFrame: # maybe convert to torc
         "volume_ma_ratio", "price_volume_corr", "rsi_14", "ma_distance", "macd_signal"
     ]
 
-    return df[feature_cols]
+    result = df[feature_cols].copy()
+
+    # Replace infinite values with NaN
+    result = result.replace([np.inf, -np.inf], np.nan)
+
+    return result
 
 
 if __name__ == '__main__':

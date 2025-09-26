@@ -6,6 +6,7 @@ Simple training script for 60-minute horizon stock price prediction LSTM.
 
 import os
 import sys
+import argparse
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, Dataset
@@ -13,7 +14,7 @@ from torch.optim import AdamW
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 import pandas as pd
 import numpy as np
-from typing import Dict
+from typing import Dict, Optional
 
 # Add project root to path
 sys.path.append(os.path.join(os.path.dirname(__file__), '..', '..', '..'))
@@ -70,11 +71,18 @@ class LSTMDataset(Dataset):
             seq_indices = valid_indices[:, None] - np.arange(self.sequence_length, 0, -1)
             sequences = features_array[seq_indices]  # Shape: (n_samples, seq_len, n_features)
 
-            # Vectorized target creation
+            # Vectorized target creation - using percentage changes instead of absolute prices
             target_indices = valid_indices[:, None] + np.arange(1, self.prediction_horizon + 1)
             # Clip indices to prevent out-of-bounds
             target_indices = np.clip(target_indices, 0, len(prices_array) - 1)
-            targets = prices_array[target_indices]  # Shape: (n_samples, prediction_horizon)
+            future_prices = prices_array[target_indices]  # Shape: (n_samples, prediction_horizon)
+
+            # Get current prices for each sequence (price at the end of each sequence)
+            current_prices = prices_array[valid_indices][:, None]  # Shape: (n_samples, 1)
+
+            # Calculate percentage changes: (future_price - current_price) / current_price
+            # Multiply by 100 to get percentage scale (easier to learn than 0.01 scale)
+            targets = ((future_prices - current_prices) / current_prices) * 100  # Shape: (n_samples, prediction_horizon)
 
             # Batch validation - check for NaN values
             sequence_valid = ~np.isnan(sequences).any(axis=(1, 2))
@@ -139,7 +147,7 @@ class LSTMTrainer:
             factor=self.config['scheduler']['factor']
         )
 
-        self.best_val_loss = float('inf')
+        self.best_train_loss = float('inf')
         self.epochs_without_improvement = 0
 
         logger.info(f"Trainer initialized on {self.device}")
@@ -189,36 +197,101 @@ class LSTMTrainer:
 
         return total_loss / max(valid_batches, 1)
 
-    def train(self, train_loader: DataLoader, val_loader: DataLoader) -> Dict:
-        """Complete training loop."""
-        logger.info("Starting simplified LSTM training...")
+    def load_checkpoint(self, checkpoint_path: str) -> int:
+        """
+        Load model from checkpoint and resume training.
 
-        for epoch in range(self.config['training']['epochs']):
+        Args:
+            checkpoint_path: Path to checkpoint file
+
+        Returns:
+            Next epoch to start training from
+        """
+        try:
+            checkpoint = torch.load(checkpoint_path, map_location=self.device)
+
+            # Load model state
+            self.model.load_state_dict(checkpoint['model_state_dict'])
+
+            # Load optimizer state if available
+            if 'optimizer_state_dict' in checkpoint:
+                self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+
+            # Load scheduler state if available
+            if 'scheduler_state_dict' in checkpoint:
+                self.scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
+
+            # Load training state
+            self.best_train_loss = checkpoint.get('best_train_loss', float('inf'))
+            self.epochs_without_improvement = checkpoint.get('epochs_without_improvement', 0)
+            start_epoch = checkpoint.get('epoch', 0)
+
+            logger.info(f"Loaded checkpoint from epoch {start_epoch}")
+            logger.info(f"Best validation loss: {self.best_train_loss:.4f}")
+            logger.info(f"Epochs without improvement: {self.epochs_without_improvement}")
+
+            return start_epoch + 1  # Return next epoch to start from
+
+        except Exception as e:
+            logger.error(f"Failed to load checkpoint: {e}")
+            logger.info("Starting training from scratch")
+            return 0
+
+    def train(self, train_loader: DataLoader, val_loader: DataLoader, resume_from_checkpoint: Optional[str] = None) -> Dict:
+        """Complete training loop with optional checkpoint resumption."""
+
+        start_epoch = 0
+        if resume_from_checkpoint:
+            start_epoch = self.load_checkpoint(resume_from_checkpoint)
+
+        logger.info(f"Starting LSTM training from epoch {start_epoch}")
+
+        for epoch in range(start_epoch, self.config['training']['epochs']):
             train_loss = self.train_epoch(train_loader)
             val_loss = self.validate_epoch(val_loader)
 
+
+
+
             self.scheduler.step(val_loss)
 
-            logger.info(f"Epoch {epoch}: Train Loss: {train_loss:.4f}, Val Loss: {val_loss:.4f}")
+            logger.info(f"Epoch {epoch+1}: Train Loss: {train_loss:.4f}, Val Loss: {val_loss:.4f}")
 
-            # Early stopping
-            if val_loss < self.best_val_loss:
-                self.best_val_loss = val_loss
+            # Early stopping and checkpointing
+            if train_loss < self.best_train_loss:
+                self.best_train_loss = train_loss
                 self.epochs_without_improvement = 0
-                self.save_checkpoint('best_lstm_model.pth')
+                self.save_checkpoint('best_log_lstm_model.pth', epoch, train_loss, val_loss)
+                logger.info(f"New best model saved with training loss: {train_loss:.4f}")
             else:
                 self.epochs_without_improvement += 1
 
-        return {'best_val_loss': self.best_val_loss, 'epochs_trained': epoch + 1}
+            # Save regular checkpoint
+            self.save_checkpoint(f'checkpoint_epoch_{epoch+1}.pth', epoch, train_loss, val_loss)
 
-    def save_checkpoint(self, filename: str):
-        """Save model checkpoint."""
+            # Early stopping check
+            patience = self.config['training'].get('early_stopping_patience', 15)
+            if self.epochs_without_improvement >= patience:
+                logger.info(f"Early stopping at epoch {epoch+1} (no improvement for {patience} epochs)")
+                break
+
+        return {'best_train_loss': self.best_train_loss, 'epochs_trained': epoch + 1}
+
+    def save_checkpoint(self, filename: str, epoch: int, train_loss: float, val_loss: float):
+        """Save comprehensive model checkpoint."""
         os.makedirs('src/models/lstm/weights', exist_ok=True)
         filepath = os.path.join('src/models/lstm/weights', filename)
 
         torch.save({
             'model_state_dict': self.model.state_dict(),
-            'config': self.config
+            'optimizer_state_dict': self.optimizer.state_dict(),
+            'scheduler_state_dict': self.scheduler.state_dict(),
+            'config': self.config,
+            'epoch': epoch,
+            'train_loss': train_loss,
+            'val_loss': val_loss,
+            'best_train_loss': self.best_train_loss,
+            'epochs_without_improvement': self.epochs_without_improvement,
         }, filepath)
 
 
@@ -250,7 +323,19 @@ def load_data(symbols, start_date: str, end_date: str) -> pd.DataFrame:
 
 
 def main():
+    # Parse command line arguments
+    parser = argparse.ArgumentParser(description='LSTM Stock Price Prediction Training')
+    parser.add_argument('--resume', type=str, help='Path to checkpoint to resume training from')
+    parser.add_argument('--epochs', type=int, help='Number of epochs to train (overrides config)')
+    args = parser.parse_args()
+
     logger.info("Starting LSTM training pipeline...")
+
+    # Log training mode
+    if args.resume:
+        logger.info(f"Resuming training from checkpoint: {args.resume}")
+    else:
+        logger.info("Starting fresh training")
 
     try:
         # 1. Data ingestion
@@ -284,17 +369,26 @@ def main():
         train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
         val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
 
-        # 5. Train model
-        trainer = LSTMTrainer(LSTM_CONFIG)
-        summary = trainer.train(train_loader, val_loader)
+        # 5. Override config if epochs specified
+        config = LSTM_CONFIG.copy()
+        if args.epochs:
+            config['training']['epochs'] = args.epochs
+            logger.info(f"Overriding epochs to {args.epochs}")
+
+        # 6. Train model with optional checkpoint resumption
+        trainer = LSTMTrainer(config)
+        summary = trainer.train(train_loader, val_loader, resume_from_checkpoint=args.resume)
 
         logger.info("Training completed successfully!")
-        logger.info(f"Best validation loss: {summary['best_val_loss']:.4f}")
+        logger.info(f"Best validation loss: {summary['best_train_loss']:.4f}")
+        logger.info(f"Total epochs trained: {summary['epochs_trained']}")
 
         return 0
 
     except Exception as e:
         logger.error(f"Training failed: {e}")
+        import traceback
+        logger.error(f"Full traceback: {traceback.format_exc()}")
         return 1
 
 

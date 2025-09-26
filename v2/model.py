@@ -15,6 +15,7 @@ random.seed(RANDOM_SEED)
 class StockPriceLSTM(nn.Module):
     def __init__(self,
         input_size: int,
+        output_size: int,
         hidden_size: int,
         num_layers: int,
         dropout: int,
@@ -24,6 +25,7 @@ class StockPriceLSTM(nn.Module):
         super(StockPriceLSTM, self).__init__()
         self.input_size = input_size
         self.input_length = input_length
+        self.output_size = output_size
         self.output_length = output_length
         self.hidden_size = hidden_size
         self.num_layers = num_layers
@@ -37,17 +39,9 @@ class StockPriceLSTM(nn.Module):
             batch_first=True,
         )
 
-        self.attention = nn.MultiheadAttention(
-            embed_dim=hidden_size,
-            num_heads=8,
-            batch_first=True,
-        )
-
-        self.layer_norm = nn.LayerNorm(hidden_size)
-
         self.fc = nn.Linear(
             in_features=hidden_size,
-            out_features=output_length,
+            out_features=output_size,
         )
 
     def forward(self, x):
@@ -59,19 +53,30 @@ class StockPriceLSTM(nn.Module):
         # output: (batch_size, seq_len, hidden_size)
         out, (hn, cn) = self.lstm(x, (h0, c0))
 
-        # Apply self-attention over sequence
-        attn_out, _ = self.attention(out, out, out)
+        # Use only the final timestep for prediction
+        final_hidden = out[:, -1, :]  # (batch_size, hidden_size)
 
-        # Residual connection and layer norm
-        out = self.layer_norm(out + attn_out)
+        # Single step prediction of all input features
+        prediction = self.fc(final_hidden)  # (batch_size, input_size)
+        return prediction
 
-        # Global average pooling over sequence dimension
-        out = torch.mean(out, dim=1)
 
-        # Final prediction
-        out = self.fc(out)
-        return out
+def predict_multiple_steps(model, initial_sequence, n_steps):
+    predictions = []
+    current_input = initial_sequence  # (batch_size, seq_len, input_size)
 
+    for _ in range(n_steps):
+        # Predict next timestep (all features)
+        next_features = model(current_input)  # (batch_size, input_size)
+        predictions.append(next_features)
+
+        # Update input: remove oldest timestep, add new prediction
+        current_input = torch.cat([
+            current_input[:, 1:, :],  # Remove first timestep
+            next_features.unsqueeze(1)  # Add predicted timestep
+        ], dim=1)
+
+    return torch.stack(predictions, dim=1)  # (batch_size, n_steps, input_size)
 
 # TODO:
 # - implement training (sampling, loss, validation, optimizing training)

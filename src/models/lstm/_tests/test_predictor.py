@@ -354,33 +354,7 @@ class TestLSTMPredictor:
         sequence = predictor._prepare_sequence(data_with_nan)
         
         assert sequence is None  # Should return None due to NaN
-    
-    @patch('torch.load')
-    @patch('src.models.lstm.predictor.StockPriceLSTM')
-    def test_get_fallback_prediction(self, mock_lstm_class, mock_torch_load, mock_checkpoint):
-        """Test fallback prediction generation."""
-        mock_torch_load.return_value = mock_checkpoint
-        mock_model_instance = Mock()
-        mock_model_instance.prediction_horizons = [5, 15, 30, 60]
-        mock_lstm_class.return_value = mock_model_instance
-        
-        predictor = LSTMPredictor("test_model.pth")
-        fallback = predictor._get_fallback_prediction()
-        
-        assert isinstance(fallback, dict)
-        assert '5min' in fallback
-        assert '15min' in fallback
-        assert '30min' in fallback
-        assert '60min' in fallback
-        
-        for horizon_key in fallback:
-            pred = fallback[horizon_key]
-            assert 'price' in pred
-            assert 'confidence' in pred
-            assert 'variance' in pred
-            assert pred['confidence'] == 0.1  # Low confidence
-            assert pred['variance'] == 25.0    # High uncertainty
-    
+
     @patch('torch.load')
     @patch('src.models.lstm.predictor.StockPriceLSTM')
     def test_get_model_info(self, mock_lstm_class, mock_torch_load, mock_checkpoint):

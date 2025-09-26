@@ -1,3 +1,4 @@
+from datetime import datetime
 import os
 from dotenv import load_dotenv
 from alpaca.trading.client import TradingClient
@@ -26,8 +27,9 @@ SYMBOLS = ['AAPL']
 
 # model
 LSTM_MODEL = {
-    'input_size': 16,           # feature set
+    'input_size': 18,           # feature set
     'input_length': 60,         # 60 days of history
+    'output_size': 18,          # match input size for iterative forecasting
     'output_length': 15,        # 15 days of forecast (log return r_t = log(p_t) - log(p_{t-1})
     'hidden_size': 64,          # 64 hidden features
     'num_layers': 2,            # number of LSTM layers
@@ -36,6 +38,18 @@ LSTM_MODEL = {
 
 
 LSTM_TRAINING = {
+    'train_symbols': [
+        'AAPL', 'ABBV', 'ABT', 'ACN', 'ADBE', 'AIG', 'AMD', 'AMGN', 'AMT', 'AMZN',
+        'AVGO', 'AXP', 'BA', 'BAC', 'BK', 'BKNG', 'BLK', 'BMY', 'BRK.B', 'C',
+        'CAT', 'CL', 'CMCSA', 'COF', 'COP', 'COST', 'CRM', 'CSCO', 'CVS', 'CVX',
+        'DE', 'DHR', 'DIS', 'DUK', 'EMR', 'FDX', 'GD', 'GE', 'GILD', 'GM',
+        'GOOG', 'GOOGL', 'GS', 'HD', 'HON', 'IBM', 'INTC', 'INTU', 'ISRG', 'JNJ',
+        'JPM', 'KO', 'LIN', 'LLY', 'LMT', 'LOW', 'MA', 'MCD', 'MDLZ', 'MDT',
+        'MET', 'META', 'MMM', 'MO', 'MRK', 'MS', 'MSFT', 'NEE', 'NFLX', 'NKE',
+        'NOW', 'NVDA', 'ORCL', 'PEP', 'PFE', 'PG', 'PLTR', 'PM', 'PYPL', 'QCOM',
+        'RTX', 'SBUX', 'SCHW', 'SO', 'SPG', 'T', 'TGT', 'TMO', 'TMUS', 'TSLA',
+        'TXN', 'UBER', 'UNH', 'UNP', 'UPS', 'USB', 'V', 'VZ', 'WFC', 'WMT', 'XOM'
+    ],
     'epochs': 100,
     'batch_size': 64,               # dependent on gpu memory
     'optimizer': 'adamw',
@@ -48,6 +62,11 @@ LSTM_TRAINING = {
     'lr_factor': 0.5,
     'early_stopping_patience': 15,
     'gradient_clip_norm': 1.0,
+    'train_ratio': 0.7,
+    'val_ratio': 0.15,
+    'test_ratio': 0.15,
+    'start_date': datetime(2015, 1, 1),
+    'end_date': datetime(2025, 9, 1),
 }
 
 
