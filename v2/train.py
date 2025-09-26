@@ -299,7 +299,7 @@ def train_model():
             best_val_loss = avg_val_loss
             patience_counter = 0
             # Save best model
-            torch.save(model.state_dict(), 'best_model.pth')
+            torch.save(model.state_dict(), os.path.join(os.getcwd(), 'weights', 'best_model.pth'))
             logger.info(f"New best validation loss: {best_val_loss:.6f}")
         else:
             patience_counter += 1

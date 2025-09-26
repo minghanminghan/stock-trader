@@ -16,6 +16,7 @@ __pycache__/
 # reproducible
 data/
 logs/
+weights/
 
 # weights
 src/models/lstm/weights/
