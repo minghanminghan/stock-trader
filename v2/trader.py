@@ -1,8 +1,10 @@
-from v2.config import ALPACA_REST, ALPACA_STREAM, STRATEGY, ENVIRONMENT, LSTM_MODEL
+from v2.config import ALPACA_CLIENT, ALPACA_STREAM, STRATEGY, ENVIRONMENT, LSTM_MODEL
 from v2.utils import log_params, log_params_async, logger, preprocess_data
 from pprint import pprint
-from typing import Optional
-from alpaca_trade_api.rest import Order
+from typing import Literal
+# from alpaca_trade_api.rest import Order
+from alpaca.trading.requests import MarketOrderRequest
+from alpaca.data.models import Quote
 from dataclasses import dataclass
 from pandas import DataFrame
 import bisect
@@ -29,31 +31,37 @@ class SimpleOrder: # potentially deconstruct into numpy array
 
 class OrderTracker:
     def __init__(self, symbol: str):
+        self.bid_price: float # = quote.bid_price # will constantly update this from websocket
+        self.ask_price: float # = quote.ask_price
         self.symbol: str = symbol
         self.orders: list[SimpleOrder] = []
 
-    def add_order(self, order_id: str, price: float, shares: float):
+    def update_quote(self, quote: Quote):
+        self.bid_price = quote.bid_price
+        self.ask_price = quote.ask_price
+
+    def add_order(self, order_id: str, shares: float):
         order = SimpleOrder(
             order_id,
-            price,
+            self.bid_price,
             shares,
-            tp=price * STRATEGY['take_profit'],
-            sl=price * STRATEGY['stop_loss']
+            tp=self.bid_price * STRATEGY['take_profit'],
+            sl=self.bid_price * STRATEGY['stop_loss']
         )
         bisect.insort(self.orders, order)
 
-    def check_orders(self, price: float) -> list[SimpleOrder]:
+    def check_orders(self) -> list[SimpleOrder]:
         '''
         price: new stock price\n
         returns the tp and sl orders that cross this threshold
         '''
         orders: list[SimpleOrder] = []
         for i in self.orders: # can improve this
-            if i.tp <= price or i.sl >= price:
+            if i.tp <= self.bid_price or i.sl >= self.ask_price:
                 orders.append(i)
         return orders
     
-    def get_sell_order_value(self, price: float) -> float:
+    def get_sell_order_value(self) -> float:
         '''
         price: new stock price\n
         remove orders past threshold and return the notional value for the sell order
@@ -62,15 +70,15 @@ class OrderTracker:
         remaining_orders = []
 
         for order in self.orders:
-            if price >= order.tp or price <= order.sl:
+            if self.ask_price >= order.tp or self.ask_price <= order.sl:
                 shares += order.shares
             else:
                 remaining_orders.append(order)
 
         self.orders = remaining_orders
-        return shares * price
+        return shares * self.ask_price
 
-    def save_state(self):
+    def save_state(self): # save to pickle
         pass
 
     def load_state(self):
@@ -95,7 +103,7 @@ class DataQueue():
 
 @log_params
 def update_account():
-    account = ALPACA_REST.get_account()
+    account = ALPACA_CLIENT.get_account()
 
     # set STRATEGY params (buying power, cash)
     logger.debug(f'buying power: {account.buying_power}, cash: {account.cash}')
@@ -104,35 +112,18 @@ def update_account():
 
 
 @log_params
-def exec_buy_order(symbol: str, price: float, notional: float = STRATEGY['cash'] * 0.02):
+def exec_order(symbol: str, side: Literal['buy', 'sell'], notional: float):
     '''
     symbol: symbol to buy\n
     entry_price: market price at buy time, used to calculate tp, sl\n
     notional: notional shares
     '''
-    # add to resp. OrderTracker
-    return ALPACA_REST.submit_order(
+    return ALPACA_CLIENT.submit_order(MarketOrderRequest(
         symbol=symbol,
-        side='buy',
+        side=side,
         notional=notional,
     )
-
-
-@log_params
-def exec_sell_order(symbol: str, notional: float):
-    '''
-    symbol: symbol to sell\n
-    notional: amount to sell\n
-    '''
-    return ALPACA_REST.submit_order(
-        symbol=symbol,
-        side='sell',
-        notional=notional,
-    )
-
-
-def get_order(order_id: str, nested: bool = False) -> Order:
-    return ALPACA_REST.get_order(order_id=order_id, nested=nested)
+)
 
 
 # @log_params_async
@@ -146,10 +137,6 @@ if __name__ == '__main__':
     # print(aapl_latest)
     # order = exec_buy_order('AAPL', aapl_latest.p, 100)
     # print(order)
-
-    # order = get_order('54868f24-d5fb-467b-acc9-89f1507f329a', True)
-    # pprint(order)
-    # pprint(order.stop_price)
 
     # orders = ALPACA_REST.list_orders(status='all', symbols=['AAPL'])
     # pprint(orders)

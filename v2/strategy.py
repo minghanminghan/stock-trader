@@ -15,7 +15,7 @@ class Signal(Enum):
 # TODO: translate model output into (SYMBOL, ACTION, QTY) tuple
 
 # @log_params
-def get_signal(historical_data) -> Signal:
+def get_signal(historical_data) -> Signal: # some iterable, not sure what the model output will look like yet
     '''
     translate historical data into [BUY, SELL, HOLD] signal
     '''
