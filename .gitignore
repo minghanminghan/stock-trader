@@ -1,7 +1,7 @@
 # env
 .env
 
-# coding agents
+# agents
 .cline
 .claude
 CLAUDE.md
@@ -17,10 +17,6 @@ __pycache__/
 data/
 logs/
 weights/
-
-# weights
-src/models/lstm/weights/
-src/models/**/weights/
 
 # temporary
 tmp/

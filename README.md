@@ -16,11 +16,9 @@ python -m src.main
 ```
 
 # TODO
+- add backtesting
 - add good unit tests
-- retrain LSTM model
-  - simplify prediction: either positive, negative, or neutral
-  - strategy: buy and hold for entire day
-- config: split ‘symbols’ into ‘train_symbols’, ‘test_symbols’
+- retrain model on more data
 - add uuid support, initialize random seeding from config
 - create benchmarking tools
 - integrate LGBM model
