@@ -39,8 +39,8 @@ def log_params_async(fn: Callable):
     return wrapper
 
 
+@log_params
 def get_data(symbol: str, start: datetime, end: datetime, feed: DataFeed = DataFeed.IEX, bypass_local=False) -> pd.DataFrame:
-    logger.debug('get_data')
     path = f'{symbol}_1_1Day_{start.strftime('%Y-%m-%d')}_{end.strftime('%Y-%m-%d')}' # hardcoding some timeframe stuff here
     full_path = os.path.join(os.getcwd(), 'data', path)
     
@@ -72,6 +72,12 @@ def get_data(symbol: str, start: datetime, end: datetime, feed: DataFeed = DataF
 
     finally:
         return data
+
+
+@log_params
+def get_quotes(symbol: str, start: datetime, end: datetime, feed: DataFeed=DataFeed.IEX):
+    # mirror get_data
+    pass
 
 
 # @log_params

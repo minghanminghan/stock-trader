@@ -67,11 +67,11 @@ class StockDataset(Dataset):
         targets = []
 
         # Create sliding windows
-        for i in range(self.input_length, len(data)):
+        for i in range(self.input_length, len(data)-1):
             # Input: previous input_length timesteps
             seq = data[i - self.input_length:i]
-            # Target: current timestep (what we want to predict)
-            target = data[i]
+            # Target: next timestep (what we want to predict)
+            target = data[i + 1]
 
             sequences.append(seq)
             targets.append(target)
@@ -310,7 +310,7 @@ def train_model():
 
     # Final test evaluation
     logger.info("Training complete. Evaluating on test set...")
-    model.load_state_dict(torch.load('best_model.pth'))
+    model.load_state_dict(torch.load(os.path.join(os.getcwd(), 'weights', 'best_model.pth')))
     test_loss = validate_model(model, test_loader, loss_fn, device)
     logger.info(f"Final test loss: {test_loss:.6f}")
 

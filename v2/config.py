@@ -16,9 +16,9 @@ RANDOM_SEED = 0
 STRATEGY = {
     'buying_power': 0,              # cash + stock value
     'cash': 0,                      # cash on hand
-    'investment_size': 0.02,        # 2% of cash per trade
-    'buy_threshold_log': 0.2,       # predicted log increase to buy
-    'sell_threshold_log': 0.2,      # predicted log decrease to sell
+    'investment_size': 0.05,        # 2% of cash per trade
+    'buy_threshold_log': 0.02,       # predicted log increase to buy (2% gain)
+    'sell_threshold_log': -0.02,     # predicted log decrease to sell (2% loss)
     'take_profit': 1.2,             # 20% take profit
     'stop_loss': 0.8,               # 20% stop loss
 }
@@ -65,8 +65,31 @@ LSTM_TRAINING = {
     'train_ratio': 0.7,
     'val_ratio': 0.15,
     'test_ratio': 0.15,
-    'start_date': datetime(2015, 1, 1),
+    'start_date': datetime(2005, 1, 1),
     'end_date': datetime(2025, 9, 1),
+}
+
+
+# backtest
+BACKTEST = {
+    'symbols': [
+        # Large Cap Tech
+        'AAPL', 'MSFT', 'GOOGL', 'AMZN', 'META', 'NVDA',
+        # Finance
+        'JPM', 'BAC', 'WFC', 'GS',
+        # Healthcare
+        'JNJ', 'PFE', 'UNH', 'ABBV',
+        # Consumer/Industrial
+        'KO', 'PG', 'WMT', 'CAT', 'BA',
+        # Energy/Materials
+        'XOM', 'CVX', 'LIN',
+        # Different sectors for robustness testing
+    ],
+    'start_date': datetime(2020, 1, 1),
+    'end_date': datetime(2023, 12, 31),
+    'initial_capital': 100000,
+    'commission': 0.005,    # per trade
+    'slippage': 0.001,      # price impact
 }
 
 

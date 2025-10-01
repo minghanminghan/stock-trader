@@ -16,7 +16,8 @@ python -m src.main
 ```
 
 # TODO
-- add backtesting
+- fix backtesting
+  - no trades are being made but model and strategy are correct
 - add good unit tests
 - retrain model on more data
 - add uuid support, initialize random seeding from config

@@ -1,5 +1,5 @@
 from v2.trader import OrderTracker, DataQueue, update_account, exec_order
-from v2.model import dummy_predict
+from v2.model import create_StockPriceLSTM, predict_multiple_steps
 from v2.strategy import get_signal, Signal
 from v2.utils import logger, get_data
 from v2.config import ALPACA_STREAM, ALPACA_CLIENT, STRATEGY, SYMBOLS
@@ -12,25 +12,29 @@ from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
 
 order_trackers = { symbol: OrderTracker(symbol) for symbol in SYMBOLS }
 data_queues = { symbol: DataQueue(symbol) for symbol in SYMBOLS }
-
+model = create_StockPriceLSTM()
 
 async def callback_bar(bar: Bar): # may be incorrect
     symbol = bar.symbol
     cur = data_queues[symbol]
     cur.update(bar.model_dump())
 
-    forecast = dummy_predict(cur.q)
+    forecast = predict_multiple_steps(model, cur.q.to_numpy())
     signal = get_signal(forecast)
     
     if signal == Signal.BUY:
         order = exec_order(symbol, 'buy', STRATEGY['cash'] * 0.02)
-        # append to some list
+        logger.debug(order)
+        # TODO: append to some list
+        
     elif signal == Signal.SELL: # get 
         sell_amount = order_trackers[symbol].get_sell_order_value()
         order = exec_order(symbol, 'sell', sell_amount)
-        # append to some list
+        logger.debug(order)
+        # TODO: append to some list
 
     else:
+        logger.debug('no signal generated')
         pass
 
 

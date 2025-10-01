@@ -7,6 +7,7 @@ from alpaca.trading.requests import MarketOrderRequest
 from alpaca.data.models import Quote
 from dataclasses import dataclass
 from pandas import DataFrame
+import numpy as np
 import bisect
 
 
@@ -85,7 +86,6 @@ class OrderTracker:
         pass
 
 
-
 class DataQueue():
     def __init__(self, symbol: str, max_size: int = LSTM_MODEL['input_length']):
         self.symbol = symbol
@@ -93,12 +93,12 @@ class DataQueue():
         self.q: DataFrame
     
     def populate(self, bars: DataFrame):
-        self.q = preprocess_data(bars)
+        self.q = preprocess_data(bars) # maybe slice to only keep the end
     
-    def update(self, bar: dict): # might be Dataframe
+    def update(self, bar: dict): # 1 time slice
         if len(self.q) >= self.max_size: # pop
             self.q.drop(self.q.index[0], inplace=True)
-            self.q.loc[len(self.q)] = bar
+        self.q.loc[len(self.q)] = bar
 
 
 @log_params
