@@ -1,18 +1,18 @@
 from v2.config import ALPACA_CLIENT, ALPACA_STREAM, STRATEGY, ENVIRONMENT, LSTM_MODEL
 from v2.utils import log_params, log_params_async, logger, preprocess_data
 from pprint import pprint
-from typing import Literal
+from typing import Literal, Optional
 # from alpaca_trade_api.rest import Order
 from alpaca.trading.requests import MarketOrderRequest
 from alpaca.data.models import Quote
 from dataclasses import dataclass
 from pandas import DataFrame
 import numpy as np
-import bisect
+import heapq
 
 
 @dataclass
-class SimpleOrder: # potentially deconstruct into numpy array
+class SimpleOrder:
     '''
     order_id: order uuid\n
     price: price of stock at buy order\n
@@ -21,19 +21,32 @@ class SimpleOrder: # potentially deconstruct into numpy array
     sl: stop loss (derived)
     '''
     order_id: str
-    price: float
-    shares: float
-    tp: float
-    sl: float
+    price: float    # price at time bought
+    shares: float   # nominal shares bought
+    tp: float       # read from config
+    sl: float       # ^
     
+    def __init__(self, order_id: str, price: float, shares: float):
+        self.order_id = order_id
+        self.price = price
+        self.shares = shares
+        self.tp = shares * STRATEGY['take_profit']
+        self.sl = shares * STRATEGY['stop_loss']
+
     def __lt__(self, other):
-        return self.price < other.price
+        '''
+        used for heap push/pop
+        '''
+        return self.price > other.price
     
 
 class OrderTracker:
-    def __init__(self, symbol: str):
-        self.bid_price: float # = quote.bid_price # will constantly update this from websocket
-        self.ask_price: float # = quote.ask_price
+    '''
+    class to track orders and compare to bid/ask price
+    '''
+    def __init__(self, symbol: str, bid_price: float = 0.0, ask_price: float = 0.0):
+        self.bid_price: float = bid_price # = quote.bid_price # will constantly update this from websocket
+        self.ask_price: float = ask_price # = quote.ask_price
         self.symbol: str = symbol
         self.orders: list[SimpleOrder] = []
 
@@ -41,43 +54,47 @@ class OrderTracker:
         self.bid_price = quote.bid_price
         self.ask_price = quote.ask_price
 
+    def update_quote_backtest(self, price: float): # for backtesting
+        self.bid_price = price
+        self.ask_price = price
+
     def add_order(self, order_id: str, shares: float):
         order = SimpleOrder(
             order_id,
             self.bid_price,
             shares,
-            tp=self.bid_price * STRATEGY['take_profit'],
-            sl=self.bid_price * STRATEGY['stop_loss']
         )
-        bisect.insort(self.orders, order)
+        heapq.heappush(self.orders, order)
 
-    def check_orders(self) -> list[SimpleOrder]:
-        '''
-        price: new stock price\n
-        returns the tp and sl orders that cross this threshold
-        '''
-        orders: list[SimpleOrder] = []
-        for i in self.orders: # can improve this
-            if i.tp <= self.bid_price or i.sl >= self.ask_price:
-                orders.append(i)
-        return orders
+    # def check_exits(self) -> list[SimpleOrder]:
+    #     '''
+    #     price: new stock price\n
+    #     returns the tp and sl orders that cross this threshold
+    #     '''
+    #     valid_orders: list[SimpleOrder] = []
+    #     for i in self.orders: # can improve this
+    #         if i.tp <= self.bid_price or i.sl >= self.ask_price:
+    #             valid_orders.append(i)
+    #     return valid_orders
     
-    def get_sell_order_value(self) -> float:
+    def execute_exits(self) -> list[SimpleOrder]:
         '''
         price: new stock price\n
         remove orders past threshold and return the notional value for the sell order
         '''
-        shares = 0
-        remaining_orders = []
+        exits = [order for order in self.orders if self.ask_price >= order.tp or self.ask_price <= order.sl]
+        remaining = [order for order in self.orders if not(self.ask_price >= order.tp or self.ask_price <= order.sl)]
 
-        for order in self.orders:
-            if self.ask_price >= order.tp or self.ask_price <= order.sl:
-                shares += order.shares
-            else:
-                remaining_orders.append(order)
+        self.orders = remaining
+        return exits
 
-        self.orders = remaining_orders
-        return shares * self.ask_price
+    def get_total_shares(self) -> float:
+        """Get total shares across all open positions."""
+        return sum(order.shares for order in self.orders)
+
+    def has_positions(self) -> bool:
+        """Check if there are any open positions."""
+        return len(self.orders) > 0
 
     def save_state(self): # save to pickle
         pass
@@ -87,6 +104,9 @@ class OrderTracker:
 
 
 class DataQueue():
+    '''
+    class to track historical data for model forecasting
+    '''
     def __init__(self, symbol: str, max_size: int = LSTM_MODEL['input_length']):
         self.symbol = symbol
         self.max_size = max_size

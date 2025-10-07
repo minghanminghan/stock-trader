@@ -1,0 +1,80 @@
+{
+  "BACKTEST": {
+    "symbols": [
+      "AAPL",
+      "MSFT",
+      "GOOGL",
+      "AMZN",
+      "META",
+      "NVDA",
+      "JPM",
+      "BAC",
+      "WFC",
+      "GS",
+      "JNJ",
+      "PFE",
+      "UNH",
+      "ABBV",
+      "KO",
+      "PG",
+      "WMT",
+      "CAT",
+      "BA",
+      "XOM",
+      "CVX",
+      "LIN"
+    ],
+    "start_date": "2020-01-01 00:00:00",
+    "end_date": "2023-12-31 00:00:00",
+    "initial_capital": 100000,
+    "commission": 0.005,
+    "slippage": 0.001
+  },
+  "STRATEGY": {
+    "buying_power": 0,
+    "cash": 0,
+    "investment_size": 0.05,
+    "buy_threshold_log": 0.02,
+    "sell_threshold_log": -0.02,
+    "take_profit": 1.2,
+    "stop_loss": 0.8
+  },
+  "LSTM_MODEL": {
+    "input_size": 18,
+    "input_length": 60,
+    "output_size": 18,
+    "output_length": 15,
+    "hidden_size": 64,
+    "num_layers": 2,
+    "dropout": 0.2
+  },
+  "backtest_metadata": {
+    "run_timestamp": "2025-10-02T00:09:35.475334",
+    "symbols_analyzed": [
+      "AAPL",
+      "MSFT",
+      "GOOGL",
+      "AMZN",
+      "META",
+      "NVDA",
+      "JPM",
+      "BAC",
+      "WFC",
+      "GS",
+      "JNJ",
+      "PFE",
+      "UNH",
+      "ABBV",
+      "KO",
+      "PG",
+      "WMT",
+      "CAT",
+      "BA",
+      "XOM",
+      "CVX",
+      "LIN"
+    ],
+    "total_trades": 25538,
+    "backtest_period_days": 1460
+  }
+}

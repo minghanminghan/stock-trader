@@ -28,7 +28,8 @@ async def callback_bar(bar: Bar): # may be incorrect
         # TODO: append to some list
         
     elif signal == Signal.SELL: # get 
-        sell_amount = order_trackers[symbol].get_sell_order_value()
+        sell_orders = order_trackers[symbol].execute_exits()
+        sell_amount = sum(i.shares for i in sell_orders) * order_trackers[symbol].bid_price
         order = exec_order(symbol, 'sell', sell_amount)
         logger.debug(order)
         # TODO: append to some list

@@ -24,7 +24,7 @@ def get_signal(prediction: np.ndarray) -> Signal:
     '''
     prediction = prediction.flatten()
     prediction = np.cumsum(prediction)  # cumulative log returns (total expected return)
-    logger.debug(f'log close prediction: {prediction}')
+    # logger.debug(f'log close prediction: {prediction}')
 
     if np.max(prediction) >= STRATEGY['buy_threshold_log']:
         return Signal.BUY

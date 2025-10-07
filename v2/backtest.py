@@ -11,94 +11,95 @@ from v2.config import BACKTEST, STRATEGY, LSTM_MODEL
 from v2.utils import get_data, preprocess_data, logger, log_params
 from v2.model import create_StockPriceLSTM, predict_multiple_steps
 from v2.strategy import get_signal, Signal
+from v2.trader import SimpleOrder, OrderTracker, DataQueue
 
 
-@dataclass
-class BacktestOrder:
-    """
-    Simplified order for backtesting with take profit and stop loss levels.
-    """
-    order_id: str
-    entry_price: float
-    shares: float
-    tp: float  # take profit price
-    sl: float  # stop loss price
-    timestamp: datetime  # when the position was opened
+# @dataclass
+# class BacktestOrder:
+#     """
+#     Simplified order for backtesting with take profit and stop loss levels.
+#     """
+#     order_id: str
+#     entry_price: float
+#     shares: float
+#     tp: float  # take profit price
+#     sl: float  # stop loss price
+#     timestamp: datetime  # when the position was opened
 
-    def __lt__(self, other):
-        return self.entry_price < other.entry_price
+#     def __lt__(self, other):
+#         return self.entry_price < other.entry_price
 
 
-class BacktestOrderTracker:
-    """
-    Simplified order tracker for backtesting, adapted from v2/trader.py OrderTracker.
-    Manages take profit and stop loss levels for open positions.
-    """
-    def __init__(self, symbol: str):
-        self.symbol = symbol
-        self.current_price = 0.0
-        self.orders: List[BacktestOrder] = []
+# class BacktestOrderTracker:
+#     """
+#     Simplified order tracker for backtesting, adapted from v2/trader.py OrderTracker.
+#     Manages take profit and stop loss levels for open positions.
+#     """
+#     def __init__(self, symbol: str):
+#         self.symbol = symbol
+#         self.current_price = 0.0
+#         self.orders: List[BacktestOrder] = []
 
-    def update_price(self, price: float):
-        """Update the current market price for threshold checking."""
-        self.current_price = price
+#     def update_price(self, price: float):
+#         """Update the current market price for threshold checking."""
+#         self.current_price = price
 
-    def add_position(self, order_id: str, shares: float, entry_price: float, timestamp: datetime):
-        """
-        Add a new position with calculated take profit and stop loss levels.
+#     def add_position(self, order_id: str, shares: float, entry_price: float, timestamp: datetime):
+#         """
+#         Add a new position with calculated take profit and stop loss levels.
 
-        Args:
-            order_id: Unique identifier for the order
-            shares: Number of shares in the position
-            entry_price: Price at which the position was entered
-            timestamp: When the position was opened
-        """
-        order = BacktestOrder(
-            order_id=order_id,
-            entry_price=entry_price,
-            shares=shares,
-            tp=entry_price * STRATEGY['take_profit'],  # 20% profit target
-            sl=entry_price * STRATEGY['stop_loss'],    # 20% stop loss
-            timestamp=timestamp
-        )
-        bisect.insort(self.orders, order)
-        logger.debug(f"Added position {order_id}: {shares:.2f} shares @ ${entry_price:.2f}, TP: ${order.tp:.2f}, SL: ${order.sl:.2f}")
+#         Args:
+#             order_id: Unique identifier for the order
+#             shares: Number of shares in the position
+#             entry_price: Price at which the position was entered
+#             timestamp: When the position was opened
+#         """
+#         order = BacktestOrder(
+#             order_id=order_id,
+#             entry_price=entry_price,
+#             shares=shares,
+#             tp=entry_price * STRATEGY['take_profit'],  # 20% profit target
+#             sl=entry_price * STRATEGY['stop_loss'],    # 20% stop loss
+#             timestamp=timestamp
+#         )
+#         bisect.insort(self.orders, order)
+#         logger.debug(f"Added position {order_id}: {shares:.2f} shares @ ${entry_price:.2f}, TP: ${order.tp:.2f}, SL: ${order.sl:.2f}")
 
-    def check_exits(self) -> List[BacktestOrder]:
-        """
-        Check which orders should be closed due to TP/SL thresholds.
+#     def check_exits(self) -> List[BacktestOrder]:
+#         """
+#         Check which orders should be closed due to TP/SL thresholds.
 
-        Returns:
-            List of orders that hit their TP or SL levels
-        """
-        triggered_orders = []
-        for order in self.orders:
-            if self.current_price >= order.tp or self.current_price <= order.sl:
-                triggered_orders.append(order)
-        return triggered_orders
+#         Returns:
+#             List of orders that hit their TP or SL levels
+#         """
+#         triggered_orders = []
+#         for order in self.orders:
+#             if self.current_price >= order.tp or self.current_price <= order.sl:
+#                 triggered_orders.append(order)
+#         return triggered_orders
 
-    def execute_exits(self) -> List[BacktestOrder]:
-        """
-        Remove triggered orders and return them for execution.
+#     def execute_exits(self) -> List[BacktestOrder]:
+#         """
+#         Remove triggered orders and return them for execution.
 
-        Returns:
-            List of orders that were removed (to be sold)
-        """
-        triggered_orders = self.check_exits()
+#         Returns:
+#             List of orders that were removed (to be sold)
+#         """
+#         triggered_orders = self.check_exits()
 
-        # Remove triggered orders from tracking
-        for order in triggered_orders:
-            self.orders.remove(order)
+#         # Remove triggered orders from tracking
+#         for order in triggered_orders:
+#             self.orders.remove(order)
 
-        return triggered_orders
+#         return triggered_orders
 
-    def get_total_shares(self) -> float:
-        """Get total shares across all open positions."""
-        return sum(order.shares for order in self.orders)
+#     def get_total_shares(self) -> float:
+#         """Get total shares across all open positions."""
+#         return sum(order.shares for order in self.orders)
 
-    def has_positions(self) -> bool:
-        """Check if there are any open positions."""
-        return len(self.orders) > 0
+#     def has_positions(self) -> bool:
+#         """Check if there are any open positions."""
+#         return len(self.orders) > 0
 
 
 def load_backtest_data() -> pd.DataFrame:
@@ -149,15 +150,14 @@ def simulate_trading(data: pd.DataFrame, model) -> Tuple[List[Dict], List[Dict],
     input_length = LSTM_MODEL['input_length']
 
     # Initialize order trackers for each symbol
-    order_trackers = {}
-    for symbol in BACKTEST['symbols']:
-        order_trackers[symbol] = BacktestOrderTracker(symbol)
+    order_trackers = {symbol: OrderTracker(symbol) for symbol in BACKTEST['symbols']}
 
     # Group data by symbol for processing
     symbols_data = {}
     for symbol in BACKTEST['symbols']:
         symbol_mask = data['symbol'] == symbol
         symbol_data = data[symbol_mask].drop('symbol', axis=1)
+        symbol_data = symbol_data.reset_index(level=0, drop=True)  # Remove symbol from MultiIndex, keep only timestamp
         symbols_data[symbol] = symbol_data
 
     # Get all unique timestamps and process chronologically
@@ -174,7 +174,7 @@ def simulate_trading(data: pd.DataFrame, model) -> Tuple[List[Dict], List[Dict],
         current_prices = {}
 
         for symbol in BACKTEST['symbols']:
-            symbol_data = symbols_data[symbol]
+            symbol_data: pd.DataFrame = symbols_data[symbol]
             if timestamp in symbol_data.index:
                 current_log_price = symbol_data.loc[timestamp].iloc[0]  # log_close is first feature
                 current_price = np.exp(current_log_price)
@@ -222,7 +222,7 @@ def simulate_trading(data: pd.DataFrame, model) -> Tuple[List[Dict], List[Dict],
                 current_price = np.exp(current_log_price)
 
                 # Update price for TP/SL checking
-                order_trackers[symbol].update_price(current_price)
+                order_trackers[symbol].update_quote_backtest(current_price)
 
                 # Check for TP/SL exits BEFORE processing new signals
                 exit_orders = order_trackers[symbol].execute_exits()
@@ -252,11 +252,11 @@ def simulate_trading(data: pd.DataFrame, model) -> Tuple[List[Dict], List[Dict],
                         'value': exit_order.shares * execution_price,
                         'commission': BACKTEST['commission'],
                         'cash_after': cash,
-                        'entry_price': exit_order.entry_price,
-                        'entry_timestamp': exit_order.timestamp,
-                        'pnl': (execution_price - exit_order.entry_price) * exit_order.shares - BACKTEST['commission']
+                        'entry_price': exit_order.price,
+                        # 'entry_timestamp': exit_order.timestamp, # should add this
+                        'pnl': (execution_price - exit_order.price) * exit_order.shares - BACKTEST['commission']
                     })
-                    logger.debug(f"{exit_reason} {exit_order.shares:.2f} shares of {symbol} at ${execution_price:.2f} (entry: ${exit_order.entry_price:.2f})")
+                    # logger.debug(f"{exit_reason} {exit_order.shares:.2f} shares of {symbol} at ${execution_price:.2f} (entry: ${exit_order.price:.2f})")
 
                 # Generate prediction and signal for new positions
                 prediction = predict_multiple_steps(model, sequence)
@@ -290,7 +290,8 @@ def simulate_trading(data: pd.DataFrame, model) -> Tuple[List[Dict], List[Dict],
 
                         # Add position to order tracker for TP/SL management
                         order_id = f"{symbol}_{timestamp.strftime('%Y%m%d_%H%M%S')}_{len(trades)}"
-                        order_trackers[symbol].add_position(order_id, shares, execution_price, timestamp)
+                        # order_trackers[symbol].add_position(order_id, shares, execution_price, timestamp)
+                        order_trackers[symbol].add_order(order_id, shares)
 
                         trades.append({
                             'timestamp': timestamp,
@@ -302,7 +303,7 @@ def simulate_trading(data: pd.DataFrame, model) -> Tuple[List[Dict], List[Dict],
                             'commission': BACKTEST['commission'],
                             'cash_after': cash
                         })
-                        logger.debug(f"BUY {shares:.2f} shares of {symbol} at ${execution_price:.2f} (slippage: {BACKTEST['slippage']*100:.3f}%)")
+                        # logger.debug(f"BUY {shares:.2f} shares of {symbol} at ${execution_price:.2f} (slippage: {BACKTEST['slippage']*100:.3f}%)")
 
                 elif signal == Signal.SELL and order_trackers[symbol].has_positions():
                     # Apply slippage to execution price (sell at lower price)
@@ -319,7 +320,7 @@ def simulate_trading(data: pd.DataFrame, model) -> Tuple[List[Dict], List[Dict],
                         total_shares += order.shares
 
                         # Calculate PnL for this specific order
-                        order_pnl = (execution_price - order.entry_price) * order.shares - (BACKTEST['commission'] / len(all_orders))
+                        order_pnl = (execution_price - order.price) * order.shares - (BACKTEST['commission'] / len(all_orders))
                         total_pnl += order_pnl
 
                         trades.append({
@@ -331,8 +332,8 @@ def simulate_trading(data: pd.DataFrame, model) -> Tuple[List[Dict], List[Dict],
                             'value': order.shares * execution_price,
                             'commission': BACKTEST['commission'] / len(all_orders),
                             'cash_after': cash,
-                            'entry_price': order.entry_price,
-                            'entry_timestamp': order.timestamp,
+                            'entry_price': order.price,
+                            # 'entry_timestamp': order.timestamp,
                             'pnl': order_pnl
                         })
 
@@ -340,7 +341,7 @@ def simulate_trading(data: pd.DataFrame, model) -> Tuple[List[Dict], List[Dict],
                     order_trackers[symbol].orders.clear()
                     positions[symbol] = 0
 
-                    logger.debug(f"SELL {total_shares:.2f} shares of {symbol} at ${execution_price:.2f} (signal-based, PnL: ${total_pnl:.2f})")
+                    # logger.debug(f"SELL {total_shares:.2f} shares of {symbol} at ${execution_price:.2f} (signal-based, PnL: ${total_pnl:.2f})")
 
             except Exception as e:
                 logger.error(f"Error processing {symbol} at {timestamp}: {e}")
@@ -437,7 +438,7 @@ def save_backtest_results(trades: List[Dict], portfolio_history: List[Dict],
         results_dir: Path to created results directory
     """
     # Create timestamped results directory
-    timestamp = datetime.now().strftime("%Y-%m-%d")
+    timestamp = datetime.now().strftime("%Y-%m-%d-%h-%m-%s")
     results_dir = os.path.join("v2", "backtests", f"backtest_results_{timestamp}")
     os.makedirs(results_dir, exist_ok=True)
 
